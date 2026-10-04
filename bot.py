@@ -41,7 +41,7 @@ except ValueError:
 
 ROBLOX_USERNAME_RE = re.compile(r"^[A-Za-z0-9_]{3,20}$")
 SNOWFLAKE_RE = re.compile(r"^\d{15,20}$")
-REFUSAL = "This is a private bot. Only its owner can use it."
+REFUSAL = "You arent fern, if you got this code off github then change the .env."
 
 
 class OwnerOnlyTree(app_commands.CommandTree):
