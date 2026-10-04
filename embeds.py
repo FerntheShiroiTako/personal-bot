@@ -297,33 +297,6 @@ def build_messages(header: discord.Embed, sections: list[Section]) -> list[list[
     return messages
 
 
-SEVERITY = {HIT: 0, PROCESS: 1, ERROR: 2, CLEAR: 3, NA: 4}
-
-
-def everyone_embed(rows: list[tuple[discord.abc.User, list[LookupResult]]]) -> discord.Embed:
-    """One line per person: a coloured dot per source, worst results first."""
-    def worst(results: list[LookupResult]) -> int:
-        return min((SEVERITY[result_status(r)] for r in results), default=SEVERITY[CLEAR])
-
-    rows = sorted(rows, key=lambda row: worst(row[1]))
-    sources = [r.provider.name for r in rows[0][1]] if rows else []
-    lines = [f"-# Dots in order: {', '.join(sources)}", f"-# {LEGEND}", ""]
-    for user, results in rows:
-        dots = "".join(result_status(r).emoji for r in results)
-        name = _esc(user.global_name or user.name)
-        lines.append(f"{dots} **{name}** (@{_esc(user.name)}) `{user.id}`")
-    lines += ["", "-# Run /check user:<id> for the full breakdown on anyone."]
-
-    embed = discord.Embed(
-        title=f"Checked {len(rows)} {'person' if len(rows) == 1 else 'people'} in this conversation",
-        description=_fit_lines(lines, 4096),
-        color=overall_color(r for _, results in rows for r in results),
-        timestamp=discord.utils.utcnow(),
-    )
-    embed.set_footer(text=FOOTER)
-    return embed
-
-
 def parse_iso(value: str | None) -> datetime | None:
     if not value:
         return None

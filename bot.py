@@ -44,7 +44,6 @@ except ValueError:
 ROBLOX_USERNAME_RE = re.compile(r"^[A-Za-z0-9_]{3,20}$")
 SNOWFLAKE_RE = re.compile(r"^\d{15,20}$")
 MENTION_RE = re.compile(r"^<@!?(\d{15,20})>$")
-MAX_EVERYONE = 10  # group DMs hold at most 10 people
 REFUSAL = "You arent fern, if you got this code off github then change the .env."
 
 
@@ -123,37 +122,6 @@ def dm_partner(interaction: discord.Interaction) -> discord.User | None:
     me = {interaction.user.id, bot.user.id if bot.user else 0}
     others = [u for u in channel.recipients if u.id not in me]
     return others[0] if len(others) == 1 else None
-
-
-def conversation_members(interaction: discord.Interaction) -> list[discord.User]:
-    """Everyone else in the DM or group DM the command was run in."""
-    channel = interaction.channel
-    if not isinstance(channel, (discord.DMChannel, discord.GroupChannel)):
-        return []
-    me = {interaction.user.id, bot.user.id if bot.user else 0}
-    return [u for u in channel.recipients if u.id not in me]
-
-
-async def check_everyone(interaction: discord.Interaction, ephemeral: bool) -> None:
-    members = conversation_members(interaction)[:MAX_EVERYONE]
-    if not members:
-        if isinstance(interaction.channel, (discord.DMChannel, discord.GroupChannel)):
-            await send_error(interaction, "Discord didn't tell me who's in this conversation. "
-                                          "Right-click someone and use Apps > Check user instead.")
-        else:
-            await send_error(interaction, "Checking everyone only works in DMs and group DMs. "
-                                          "A user-installed app can't see a server's member list.")
-        return
-    await interaction.response.defer(ephemeral=ephemeral, thinking=True)
-
-    limit = asyncio.Semaphore(3)  # be gentle with Rayward's rate limits
-
-    async def lookup(member: discord.User) -> tuple[discord.User, list[LookupResult]]:
-        async with limit:
-            return member, await bot.rayward.lookup_all("discord", member.id)
-
-    rows = await asyncio.gather(*(lookup(m) for m in members))
-    await interaction.followup.send(embed=embeds.everyone_embed(list(rows)), ephemeral=ephemeral)
 
 
 async def resolve_roblox(query: str) -> tuple[RobloxUser | None, str | None]:
@@ -283,7 +251,6 @@ async def check_discord(
     user="Roblox username/ID, or Discord ID/@mention. Leave empty in a DM to check who you're talking to",
     platform="Which platform to check (default: auto-detect from what you typed)",
     visibility="Who can see the result (default: only you)",
-    everyone="Check everyone in this DM or group DM instead of one person",
 )
 @app_commands.choices(
     platform=[
@@ -303,16 +270,8 @@ async def check_cmd(
     user: app_commands.Range[str, 1, 40] | None = None,
     platform: str = "auto",
     visibility: str = "me",
-    everyone: bool = False,
 ) -> None:
     ephemeral = visibility != "everyone"
-    if everyone:
-        if platform == "roblox":
-            await send_error(interaction, "Checking everyone only works for Discord accounts.")
-            return
-        await check_everyone(interaction, ephemeral)
-        return
-
     query = (user or "").strip()
     partner: discord.User | None = None
 
