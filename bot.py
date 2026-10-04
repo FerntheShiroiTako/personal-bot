@@ -41,6 +41,7 @@ except ValueError:
 
 ROBLOX_USERNAME_RE = re.compile(r"^[A-Za-z0-9_]{3,20}$")
 SNOWFLAKE_RE = re.compile(r"^\d{15,20}$")
+MENTION_RE = re.compile(r"^<@!?(\d{15,20})>$")
 REFUSAL = "You arent fern, if you got this code off github then change the .env."
 
 
@@ -82,9 +83,31 @@ class LookupBot(discord.Client):
 bot = LookupBot()
 
 
-async def send_pages(interaction: discord.Interaction, pages: list[discord.Embed], ephemeral: bool) -> None:
-    for page in pages:
-        await interaction.followup.send(embed=page, ephemeral=ephemeral)
+async def send_messages(interaction: discord.Interaction, messages: list[list[discord.Embed]], ephemeral: bool) -> None:
+    for group in messages:
+        await interaction.followup.send(embeds=group, ephemeral=ephemeral)
+
+
+async def send_error(interaction: discord.Interaction, message: str) -> None:
+    """Errors are always private, even if the deferred reply was public."""
+    if interaction.response.is_done():
+        try:
+            await interaction.delete_original_response()
+        except discord.HTTPException:
+            pass
+        await interaction.followup.send(message, ephemeral=True)
+    else:
+        await interaction.response.send_message(message, ephemeral=True)
+
+
+def dm_partner(interaction: discord.Interaction) -> discord.User | None:
+    """The other person in a 1-on-1 DM, if the command was run in one."""
+    channel = interaction.channel
+    if not isinstance(channel, discord.DMChannel):
+        return None
+    me = {interaction.user.id, bot.user.id if bot.user else 0}
+    others = [u for u in channel.recipients if u.id not in me]
+    return others[0] if len(others) == 1 else None
 
 
 async def resolve_roblox(query: str) -> tuple[RobloxUser | None, str | None]:
@@ -115,21 +138,10 @@ async def resolve_roblox(query: str) -> tuple[RobloxUser | None, str | None]:
     return user, None
 
 
-@bot.tree.command(name="roblox", description="Look up a Roblox user across all Rayward sources")
-@app_commands.describe(user="Roblox username or user ID", public="Show the result to everyone (default: only you)")
-@app_commands.allowed_installs(guilds=False, users=True)
-@app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
-async def roblox_cmd(
-    interaction: discord.Interaction,
-    user: app_commands.Range[str, 1, 32],
-    public: bool = False,
-) -> None:
-    ephemeral = not public
-    await interaction.response.defer(ephemeral=ephemeral, thinking=True)
-
-    target, error = await resolve_roblox(user)
+async def check_roblox(interaction: discord.Interaction, query: str, ephemeral: bool) -> None:
+    target, error = await resolve_roblox(query)
     if error or target is None:
-        await interaction.followup.send(error or "Lookup failed.", ephemeral=True)
+        await send_error(interaction, error or "Lookup failed.")
         return
 
     needs_details = target.created is None
@@ -154,6 +166,11 @@ async def roblox_cmd(
         title = f"{target.display_name or target.name} (@{target.name})"
     else:
         title = f"Roblox user {target.id}"
+    sections = embeds.provider_sections(results, "roblox")
+    sections.insert(1, embeds.Section(
+        "Rotector - linked Discord", embeds.format_rotector_links(links), embeds.links_status(links),
+    ))
+
     header = discord.Embed(
         title=discord.utils.escape_markdown(title),
         url=target.profile_url,
@@ -167,36 +184,22 @@ async def roblox_cmd(
         desc.append("**Banned on Roblox:** yes")
     if not target.name:
         desc.append("*Roblox profile unavailable; showing Rayward data by ID only.*")
+    desc += ["", embeds.summary_line(sections), f"-# {embeds.LEGEND}"]
     header.description = "\n".join(desc)
     if target.avatar_url:
         header.set_thumbnail(url=target.avatar_url)
 
-    fields = embeds.provider_fields(results, "roblox")
-    fields.insert(1, ("Rotector database - linked Discord", embeds.format_rotector_links(links)))
-    await send_pages(interaction, embeds.paginate(header, fields), ephemeral)
+    await send_messages(interaction, embeds.build_messages(header, sections), ephemeral)
 
 
-@bot.tree.command(name="discord", description="Look up a Discord user ID across all Rayward sources")
-@app_commands.describe(user_id="Discord user ID (snowflake)", public="Show the result to everyone (default: only you)")
-@app_commands.allowed_installs(guilds=False, users=True)
-@app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
-async def discord_cmd(
-    interaction: discord.Interaction,
-    user_id: app_commands.Range[str, 1, 25],
-    public: bool = False,
+async def check_discord(
+    interaction: discord.Interaction, raw: str, ephemeral: bool, known: discord.User | None = None,
 ) -> None:
-    ephemeral = not public
-    raw = user_id.strip().strip("<@!>")
-    if not SNOWFLAKE_RE.match(raw):
-        await interaction.response.send_message("That is not a valid Discord user ID.", ephemeral=True)
-        return
-    await interaction.response.defer(ephemeral=ephemeral, thinking=True)
-
     async def fetch_discord_user() -> discord.User | None:
         try:
             return await bot.fetch_user(int(raw))
         except (discord.NotFound, discord.HTTPException):
-            return None
+            return known
 
     results, user = await asyncio.gather(
         bot.rayward.lookup_all("discord", raw),
@@ -209,6 +212,8 @@ async def discord_cmd(
         title = f"{name} (@{user.name})"
     else:
         title = f"Discord user {raw}"
+    sections = embeds.provider_sections(results, "discord")
+
     header = discord.Embed(title=discord.utils.escape_markdown(title), color=embeds.overall_color(results))
     desc = [
         f"**Discord ID:** `{raw}`",
@@ -219,11 +224,67 @@ async def discord_cmd(
         desc.append("**Bot account:** yes")
     if not user:
         desc.append("*Discord profile could not be fetched.*")
+    desc += ["", embeds.summary_line(sections), f"-# {embeds.LEGEND}"]
     header.description = "\n".join(desc)
     if user:
         header.set_thumbnail(url=user.display_avatar.url)
 
-    await send_pages(interaction, embeds.paginate(header, embeds.provider_fields(results, "discord")), ephemeral)
+    await send_messages(interaction, embeds.build_messages(header, sections), ephemeral)
+
+
+@bot.tree.command(name="check", description="Check a Roblox or Discord user across all Rayward sources")
+@app_commands.describe(
+    user="Roblox username/ID, or Discord ID/@mention. Leave empty in a DM to check who you're talking to",
+    platform="Which platform to check (default: auto-detect from what you typed)",
+    visibility="Who can see the result (default: only you)",
+)
+@app_commands.choices(
+    platform=[
+        app_commands.Choice(name="Auto-detect", value="auto"),
+        app_commands.Choice(name="Roblox", value="roblox"),
+        app_commands.Choice(name="Discord", value="discord"),
+    ],
+    visibility=[
+        app_commands.Choice(name="Only me", value="me"),
+        app_commands.Choice(name="Everyone in the channel", value="everyone"),
+    ],
+)
+@app_commands.allowed_installs(guilds=False, users=True)
+@app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
+async def check_cmd(
+    interaction: discord.Interaction,
+    user: app_commands.Range[str, 1, 40] | None = None,
+    platform: str = "auto",
+    visibility: str = "me",
+) -> None:
+    ephemeral = visibility != "everyone"
+    query = (user or "").strip()
+    partner: discord.User | None = None
+
+    if not query:
+        partner = dm_partner(interaction)
+        if partner is None:
+            await send_error(interaction, "Tell me who to check, or run this in a DM to check the person you're talking to.")
+            return
+        if platform == "roblox":
+            await send_error(interaction, "I can only default to a DM partner's Discord account. Type a Roblox username for a Roblox check.")
+            return
+        query, platform = str(partner.id), "discord"
+
+    mention = MENTION_RE.match(query)
+    if platform == "auto":
+        platform = "discord" if mention or SNOWFLAKE_RE.match(query) else "roblox"
+
+    if platform == "discord":
+        raw = mention.group(1) if mention else query
+        if not SNOWFLAKE_RE.match(raw):
+            await send_error(interaction, "That is not a valid Discord user ID or mention.")
+            return
+        await interaction.response.defer(ephemeral=ephemeral, thinking=True)
+        await check_discord(interaction, raw, ephemeral, known=partner)
+    else:
+        await interaction.response.defer(ephemeral=ephemeral, thinking=True)
+        await check_roblox(interaction, query, ephemeral)
 
 
 @bot.tree.error

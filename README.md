@@ -4,10 +4,28 @@ A private Discord bot for Roblox and Discord lookups across the five Rayward sou
 
 ## Commands
 
-- `/roblox user:<username or ID> [public]` looks up a Roblox user. It checks all five sources and Rotector's linked-Discord data.
-- `/discord user_id:<snowflake> [public]` looks up a Discord account. It checks Rotector, TASE, Okappiki and ServerSweep. RAB has no Discord lookup.
+One command does everything:
 
-Only you can see replies unless you set `public:True`.
+```
+/check [user] [platform] [visibility]
+```
+
+- `user` is a Roblox username or ID, or a Discord ID or @mention. Leave it empty in a DM and the bot checks the person you're talking to (their Discord account).
+- `platform` can be Auto-detect (the default), Roblox or Discord. Auto-detect treats mentions and 15+ digit IDs as Discord and everything else as Roblox.
+- `visibility` can be Only me (the default) or Everyone in the channel. Errors are always private.
+
+Roblox checks cover all five sources plus Rotector's linked-Discord data. Discord checks cover Rotector, TASE, Okappiki and ServerSweep, because RAB has no Discord lookup.
+
+### Colours
+
+Each source gets its own coloured card, and the header shows a one-line summary:
+
+- 🔴 red: flagged or confirmed (an actual finding)
+- 🟠 orange: a process state such as queued, provisional or awaiting review
+- 🟢 green: no record in that source (this does not mean the account is safe)
+- 🟣 purple: the source errored or didn't answer (this does not mean the account is clean)
+- 🔵 blue: Rotector found linked Discord or alt accounts
+- ⚪ grey: the source doesn't support this lookup, or nothing was linked
 
 ## Setup
 

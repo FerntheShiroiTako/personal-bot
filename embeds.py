@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Iterable
 
@@ -12,11 +13,10 @@ from discord.utils import escape_markdown
 from rayward import PROVIDERS, Kind, LookupResult
 
 # Discord limits
-MAX_FIELDS = 25
+MAX_EMBEDS = 10
 MAX_FIELD_VALUE = 1024
-MAX_FIELD_NAME = 256
 MAX_EMBED_TOTAL = 6000
-EMBED_BUDGET = 5600  # headroom for title/footer on continuation pages
+EMBED_BUDGET = 5600  # headroom for the footer
 
 FLAG_NAMES = {
     0: "Unflagged",
@@ -31,11 +31,7 @@ FLAG_NAMES = {
 }
 ACTIONABLE = {1, 2}  # per Rayward docs, only these mean the account did something
 
-COLOR_HIT = discord.Color.red()
-COLOR_PROCESS = discord.Color.orange()
-COLOR_NONE = discord.Color.light_grey()
-
-FOOTER = "Data labelled per source via Rayward. Unflagged means no record, not safe."
+FOOTER = "Via Rayward. Green means no record, not safe."
 
 MAX_REASONS = 5
 MAX_EVIDENCE_PER_REASON = 4
@@ -207,47 +203,98 @@ def format_rotector_links(result: LookupResult) -> str:
     return _fit_lines(lines)
 
 
+@dataclass(frozen=True)
+class Status:
+    emoji: str
+    label: str
+    color: discord.Color
+
+
+HIT = Status("\N{LARGE RED CIRCLE}", "Flagged", discord.Color.red())
+PROCESS = Status("\N{LARGE ORANGE CIRCLE}", "Under review", discord.Color.orange())
+CLEAR = Status("\N{LARGE GREEN CIRCLE}", "No record", discord.Color.green())
+ERROR = Status("\N{LARGE PURPLE CIRCLE}", "Error", discord.Color.purple())
+INFO = Status("\N{LARGE BLUE CIRCLE}", "Links found", discord.Color.blue())
+NA = Status("\N{MEDIUM WHITE CIRCLE}", "Not supported", discord.Color.light_grey())
+
+LEGEND = "\N{LARGE RED CIRCLE} flagged  \N{LARGE ORANGE CIRCLE} under review  \N{LARGE GREEN CIRCLE} no record  \N{LARGE PURPLE CIRCLE} error"
+
+
+@dataclass
+class Section:
+    name: str
+    value: str
+    status: Status
+    label: str | None = None  # defaults to the status label
+
+
+def result_status(result: LookupResult) -> Status:
+    if not result.ok:
+        return ERROR
+    flag = (result.data or {}).get("flagType", 0)
+    if flag in ACTIONABLE:
+        return HIT
+    return PROCESS if flag else CLEAR
+
+
+def links_status(result: LookupResult) -> Status:
+    if not result.ok:
+        return ERROR
+    d = result.data or {}
+    return INFO if d.get("discordAccounts") or d.get("altAccounts") else NA
+
+
 def overall_color(results: Iterable[LookupResult]) -> discord.Color:
-    flags = [r.data.get("flagType", 0) for r in results if r.ok and r.data]
-    if any(f in ACTIONABLE for f in flags):
-        return COLOR_HIT
-    if any(f for f in flags):
-        return COLOR_PROCESS
-    return COLOR_NONE
+    statuses = {result_status(r) for r in results}
+    for status in (HIT, PROCESS, ERROR):
+        if status in statuses:
+            return status.color
+    return CLEAR.color
 
 
-def provider_fields(results: list[LookupResult], kind: Kind) -> list[tuple[str, str]]:
-    fields = [(f"{r.provider.name} database", format_result(r)) for r in results]
+def provider_sections(results: list[LookupResult], kind: Kind) -> list[Section]:
+    sections = [
+        Section(f"{r.provider.name} database", format_result(r), result_status(r),
+                flag_name(r.data.get("flagType", 0)) if r.ok and r.data and r.data.get("flagType") else None)
+        for r in results
+    ]
     for p in PROVIDERS:
         if not p.supports(kind):
-            fields.append((f"{p.name} database", f"Does not support {kind.capitalize()} lookups."))
-    return fields
+            sections.append(Section(f"{p.name} database", f"Does not support {kind.capitalize()} lookups.", NA))
+    return sections
 
 
-def paginate(header: discord.Embed, fields: list[tuple[str, str]]) -> list[discord.Embed]:
-    """Split fields across embeds so each stays under 25 fields and ~6000 chars.
+def summary_line(sections: list[Section]) -> str:
+    return "  ".join(f"{s.status.emoji} {s.name.removesuffix(' database')}" for s in sections)
 
-    Each returned embed should be sent as its own message, since Discord's
-    6000-character limit applies to all embeds in one message combined.
+
+def build_messages(header: discord.Embed, sections: list[Section]) -> list[list[discord.Embed]]:
+    """One colour-coded embed per section, grouped into messages within Discord's limits.
+
+    Each inner list is one message: at most 10 embeds and ~6000 characters combined.
     """
     now = discord.utils.utcnow()
-    pages: list[discord.Embed] = []
-    current = header
-    for name, value in fields:
-        name = _clip(name, MAX_FIELD_NAME)
-        value = _clip(value or "-", MAX_FIELD_VALUE)
-        if len(current.fields) >= MAX_FIELDS or len(current) + len(name) + len(value) > EMBED_BUDGET:
-            pages.append(current)
-            current = discord.Embed(title=_clip(f"{header.title or 'Lookup'} (continued)", 256), color=header.color)
-        current.add_field(name=name, value=value, inline=False)
-    pages.append(current)
+    embeds = [header]
+    for s in sections:
+        title = _clip(f"{s.status.emoji} {s.name} - {s.label or s.status.label}", 256)
+        embeds.append(discord.Embed(title=title, description=_clip(s.value or "-", MAX_FIELD_VALUE), color=s.status.color))
 
-    total = len(pages)
-    for i, page in enumerate(pages, 1):
+    messages: list[list[discord.Embed]] = [[]]
+    used = 0
+    for embed in embeds:
+        size = len(embed)
+        if messages[-1] and (len(messages[-1]) >= MAX_EMBEDS or used + size > EMBED_BUDGET):
+            messages.append([])
+            used = 0
+        messages[-1].append(embed)
+        used += size
+
+    total = len(messages)
+    for i, group in enumerate(messages, 1):
         suffix = f" | Page {i}/{total}" if total > 1 else ""
-        page.set_footer(text=FOOTER + suffix)
-        page.timestamp = now
-    return pages
+        group[-1].set_footer(text=FOOTER + suffix)
+        group[-1].timestamp = now
+    return messages
 
 
 def parse_iso(value: str | None) -> datetime | None:
