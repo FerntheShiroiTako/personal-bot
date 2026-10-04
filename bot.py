@@ -6,10 +6,12 @@ Run: python bot.py
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import re
 import sys
+from typing import Union
 
 import aiohttp
 import discord
@@ -59,7 +61,8 @@ class OwnerOnlyTree(app_commands.CommandTree):
 
 class LookupBot(discord.Client):
     def __init__(self) -> None:
-        super().__init__(intents=discord.Intents.default())  # no privileged intents needed
+        # no privileged intents needed; debug events let us log which members Discord sends
+        super().__init__(intents=discord.Intents.default(), enable_debug_events=True)
         self.tree = OwnerOnlyTree(self)
         self.http_session: aiohttp.ClientSession | None = None
         self.rayward: RaywardClient
@@ -71,6 +74,17 @@ class LookupBot(discord.Client):
         self.roblox = RobloxClient(self.http_session)
         synced = await self.tree.sync()
         log.info("Synced %d global command(s)", len(synced))
+
+    async def on_socket_raw_receive(self, msg: str | bytes) -> None:
+        if b"INTERACTION_CREATE" not in (msg if isinstance(msg, bytes) else msg.encode()):
+            return
+        try:
+            channel = json.loads(msg)["d"].get("channel") or {}
+        except (ValueError, KeyError, TypeError, AttributeError):
+            return
+        recipients = [u.get("id") for u in channel.get("recipients") or []]
+        log.info("Interaction channel: type=%s id=%s recipients=%s",
+                 channel.get("type"), channel.get("id"), recipients if "recipients" in channel else "not sent")
 
     async def on_ready(self) -> None:
         log.info("Logged in as %s (%s)", self.user, self.user.id if self.user else "?")
@@ -124,7 +138,8 @@ async def check_everyone(interaction: discord.Interaction, ephemeral: bool) -> N
     members = conversation_members(interaction)[:MAX_EVERYONE]
     if not members:
         if isinstance(interaction.channel, (discord.DMChannel, discord.GroupChannel)):
-            await send_error(interaction, "Discord didn't tell me who's in this conversation, so there's no one to check.")
+            await send_error(interaction, "Discord didn't tell me who's in this conversation. "
+                                          "Right-click someone and use Apps > Check user instead.")
         else:
             await send_error(interaction, "Checking everyone only works in DMs and group DMs. "
                                           "A user-installed app can't see a server's member list.")
@@ -304,7 +319,7 @@ async def check_cmd(
     if not query:
         partner = dm_partner(interaction)
         if partner is None:
-            await send_error(interaction, "Tell me who to check, or run this in a DM to check the person you're talking to.")
+            await send_error(interaction, "Tell me who to check, or right-click them and use Apps > Check user.")
             return
         if platform == "roblox":
             await send_error(interaction, "I can only default to a DM partner's Discord account. Type a Roblox username for a Roblox check.")
@@ -325,6 +340,22 @@ async def check_cmd(
     else:
         await interaction.response.defer(ephemeral=ephemeral, thinking=True)
         await check_roblox(interaction, query, ephemeral)
+
+
+@bot.tree.context_menu(name="Check user")
+@app_commands.allowed_installs(guilds=False, users=True)
+@app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
+async def check_user_menu(interaction: discord.Interaction, user: Union[discord.Member, discord.User]) -> None:
+    await interaction.response.defer(ephemeral=True, thinking=True)
+    await check_discord(interaction, str(user.id), True, known=user)
+
+
+@bot.tree.context_menu(name="Check author")
+@app_commands.allowed_installs(guilds=False, users=True)
+@app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
+async def check_author_menu(interaction: discord.Interaction, message: discord.Message) -> None:
+    await interaction.response.defer(ephemeral=True, thinking=True)
+    await check_discord(interaction, str(message.author.id), True, known=message.author)
 
 
 @bot.tree.error

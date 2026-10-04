@@ -17,6 +17,15 @@ One command does everything:
 
 Roblox checks cover all five sources plus Rotector's linked-Discord data. Discord checks cover Rotector, TASE, Okappiki and ServerSweep, because RAB has no Discord lookup.
 
+### Right-click commands
+
+Right-click a user or a message and open **Apps**:
+
+- **Check user** checks that person's Discord account.
+- **Check author** checks whoever sent that message.
+
+These work in servers, DMs and group DMs. Discord doesn't allow options on right-click commands, so the results are always private.
+
 ### Colours
 
 Each source gets its own coloured card, and the header shows a one-line summary:
