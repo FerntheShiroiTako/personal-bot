@@ -1,0 +1,56 @@
+[Unit]
+Description=Personal Rayward lookup Discord bot
+Documentation=file:///opt/lookup-bot/README.md
+Wants=network-online.target
+After=network-online.target
+# Give up after 5 failed starts in 5 minutes instead of looping forever.
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=lookupbot
+Group=lookupbot
+WorkingDirectory=/opt/lookup-bot
+EnvironmentFile=/opt/lookup-bot/.env
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/opt/lookup-bot/.venv/bin/python /opt/lookup-bot/bot.py
+
+Restart=on-failure
+RestartSec=10
+# bot.py exits 78 on config errors (missing/invalid .env values, rejected token).
+# Restarting can't fix those, so don't.
+RestartPreventExitStatus=78
+TimeoutStopSec=20
+KillSignal=SIGTERM
+
+# /var/lib/lookup-bot, exported as $STATE_DIRECTORY. Holds only the command-sync stamp.
+# Writable under ProtectSystem=strict without needing ReadWritePaths.
+StateDirectory=lookup-bot
+StateDirectoryMode=0750
+
+# Hardening
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+CapabilityBoundingSet=
+UMask=0027
+MemoryMax=256M
+
+[Install]
+WantedBy=multi-user.target
