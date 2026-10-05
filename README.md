@@ -65,7 +65,75 @@ The bot needs no privileged intents.
 python bot.py
 ```
 
-The bot syncs its slash commands globally each time it starts. New commands can take a few minutes to appear. Restarting your Discord client often makes them show up sooner.
+On startup the bot syncs its slash commands globally, but only if they changed since the last sync. It keeps a small stamp file in `.state/` locally, or in `/var/lib/lookup-bot` on the server. New commands can take a few minutes to appear, and restarting your Discord client often makes them show up sooner.
+
+Optional `.env` settings:
+
+- `LOG_LEVEL` sets how much the bot logs: `DEBUG`, `INFO` (the default), `WARNING` or `ERROR`.
+- `SYNC_COMMANDS` controls command syncing. `auto` (the default) syncs only when commands changed, `always` syncs on every start, and `never` skips syncing.
+- `DEBUG_INTERACTIONS=1` logs the raw channel data of each interaction. It includes user IDs, so leave it off unless you are debugging.
+
+## Deploy to an Ubuntu VPS
+
+The scripts in `deploy/` run the bot as a systemd service on Ubuntu 22.04 or 24.04. It runs as a locked-down `lookupbot` user from `/opt/lookup-bot`, restarts if it crashes and starts on boot. You need SSH access to the server and an account with sudo.
+
+### First install
+
+Either clone the repo on the server:
+
+```
+git clone <your-repo-url> lookup-bot
+cd lookup-bot
+sudo bash deploy/install.sh
+```
+
+Or push your local copy from your own machine. This works from Git Bash on Windows too:
+
+```
+bash deploy/push.sh user@your-server
+```
+
+`push.sh` copies the code to `~/lookup-bot` on the server. Then it runs `install.sh` there on the first push, or `update.sh` on later pushes. If SSH needs extra options, set `DEPLOY_SSH_OPTS`, for example `DEPLOY_SSH_OPTS="-p 2222 -i ~/.ssh/vps"`. You can also set `DEPLOY_HOST` instead of passing the host.
+
+`install.sh` does the following:
+
+- installs Python and git
+- creates the `lookupbot` user
+- copies the code to `/opt/lookup-bot`
+- builds a virtualenv there
+- installs and enables the service
+
+Your local `.env` is never copied. On the first install the script creates `/opt/lookup-bot/.env` from `.env.example` and doesn't start the bot. Fill in the file, then start the bot:
+
+```
+sudo nano /opt/lookup-bot/.env
+sudo systemctl restart lookup-bot
+```
+
+It's safe to run `install.sh` again. It never overwrites an existing `.env`.
+
+### Updating
+
+- On the server, from the clone: `sudo bash deploy/update.sh`. It runs `git pull`, copies the code, reinstalls requirements only if `requirements.txt` changed, and restarts the bot.
+- From your machine: `bash deploy/push.sh user@your-server`.
+
+### Logs and status
+
+```
+sudo journalctl -u lookup-bot -f        # follow live logs
+sudo journalctl -u lookup-bot -n 100    # last 100 lines
+sudo systemctl status lookup-bot
+```
+
+### Stopping
+
+```
+sudo systemctl stop lookup-bot             # stop until the next boot or restart
+sudo systemctl disable --now lookup-bot    # stop and don't start on boot
+sudo systemctl enable --now lookup-bot     # turn it back on
+```
+
+If the token or another `.env` value is missing or invalid, the bot exits with code 78. systemd then leaves it stopped rather than restarting it. Other crashes restart after 10 seconds. If the bot fails 5 times within 5 minutes, systemd gives up until you fix the problem and run `systemctl restart`.
 
 ## Notes
 
