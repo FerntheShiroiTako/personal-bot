@@ -6,11 +6,14 @@ Run: python bot.py
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
 import re
+import signal
 import sys
+from pathlib import Path
 from typing import Union
 
 import aiohttp
@@ -22,16 +25,47 @@ import embeds
 from rayward import ROTECTOR, LookupResult, RaywardClient
 from roblox import RobloxClient, RobloxError, RobloxUser
 
+# Exit code for configuration errors (sysexits EX_CONFIG). The systemd unit lists it in
+# RestartPreventExitStatus, so a missing or bad token doesn't cause a restart loop.
+EXIT_CONFIG = 78
+
 load_dotenv()
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+
+
+def _setup_logging() -> None:
+    # journald adds its own timestamps, so leave them out when running under systemd.
+    if os.getenv("JOURNAL_STREAM"):
+        fmt = "%(levelname)s %(name)s: %(message)s"
+    else:
+        fmt = "%(asctime)s %(levelname)s %(name)s: %(message)s"
+    level_name = (os.getenv("LOG_LEVEL") or "INFO").strip().upper()
+    level = getattr(logging, level_name, None)
+    if not isinstance(level, int):
+        level = logging.INFO
+    logging.basicConfig(level=level, format=fmt)
+
+
+_setup_logging()
 log = logging.getLogger("lookup-bot")
+
+
+def _config_error(message: str) -> None:
+    log.critical(message)
+    sys.exit(EXIT_CONFIG)
 
 
 def _require_env(name: str) -> str:
     value = (os.getenv(name) or "").strip()
     if not value:
-        sys.exit(f"Missing {name} in .env (see .env.example)")
+        _config_error(f"Missing {name} in .env (see .env.example)")
     return value
+
+
+def _env_flag(name: str, default: bool = False) -> bool:
+    value = (os.getenv(name) or "").strip().lower()
+    if not value:
+        return default
+    return value in ("1", "true", "yes", "on")
 
 
 DISCORD_TOKEN = _require_env("DISCORD_TOKEN")
@@ -39,7 +73,15 @@ RAYWARD_API_KEY = _require_env("RAYWARD_API_KEY")
 try:
     OWNER_ID = int(_require_env("OWNER_ID"))
 except ValueError:
-    sys.exit("OWNER_ID must be a numeric Discord user ID")
+    _config_error("OWNER_ID must be a numeric Discord user ID")
+
+# Logs raw interaction channel payloads (includes user data). Off unless explicitly enabled.
+DEBUG_INTERACTIONS = _env_flag("DEBUG_INTERACTIONS")
+# auto: sync only when the command definitions changed since the last sync.
+# always / never: force it either way.
+SYNC_COMMANDS = (os.getenv("SYNC_COMMANDS") or "auto").strip().lower()
+# systemd sets STATE_DIRECTORY from StateDirectory=; local runs keep state next to the code.
+STATE_DIR = Path(os.getenv("STATE_DIRECTORY") or Path(__file__).resolve().parent / ".state")
 
 ROBLOX_USERNAME_RE = re.compile(r"^[A-Za-z0-9_]{3,20}$")
 SNOWFLAKE_RE = re.compile(r"^\d{15,20}$")
@@ -60,8 +102,8 @@ class OwnerOnlyTree(app_commands.CommandTree):
 
 class LookupBot(discord.Client):
     def __init__(self) -> None:
-        # no privileged intents needed; debug events let us log which members Discord sends
-        super().__init__(intents=discord.Intents.default(), enable_debug_events=True)
+        # No privileged intents needed. Debug events are only for DEBUG_INTERACTIONS.
+        super().__init__(intents=discord.Intents.default(), enable_debug_events=DEBUG_INTERACTIONS)
         self.tree = OwnerOnlyTree(self)
         self.http_session: aiohttp.ClientSession | None = None
         self.rayward: RaywardClient
@@ -71,10 +113,43 @@ class LookupBot(discord.Client):
         self.http_session = aiohttp.ClientSession(headers={"User-Agent": "personal-lookup-bot/1.0"})
         self.rayward = RaywardClient(self.http_session, RAYWARD_API_KEY)
         self.roblox = RobloxClient(self.http_session)
+        await self.sync_commands_if_needed()
+
+    def _commands_fingerprint(self) -> str:
+        payload = {
+            "application_id": self.application_id,
+            "commands": sorted(
+                (cmd.to_dict(self.tree) for cmd in self.tree.get_commands()),
+                key=lambda c: (c.get("type", 1), c["name"]),
+            ),
+        }
+        return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
+
+    async def sync_commands_if_needed(self) -> None:
+        """Sync global commands, skipping it when nothing changed so restarts don't hit rate limits."""
+        if SYNC_COMMANDS == "never":
+            log.info("Command sync disabled (SYNC_COMMANDS=never)")
+            return
+        fingerprint = self._commands_fingerprint()
+        stamp = STATE_DIR / "commands.sha256"
+        if SYNC_COMMANDS != "always":
+            try:
+                if stamp.read_text(encoding="utf-8").strip() == fingerprint:
+                    log.info("Commands unchanged since last sync, skipping (SYNC_COMMANDS=always to force)")
+                    return
+            except OSError:
+                pass  # no stamp yet: sync
+
         synced = await self.tree.sync()
         log.info("Synced %d global command(s)", len(synced))
+        try:
+            STATE_DIR.mkdir(parents=True, exist_ok=True)
+            stamp.write_text(fingerprint, encoding="utf-8")
+        except OSError as exc:
+            log.warning("Could not save command sync state to %s: %s", stamp, exc)
 
     async def on_socket_raw_receive(self, msg: str | bytes) -> None:
+        # Only dispatched when enable_debug_events is on, i.e. DEBUG_INTERACTIONS=1.
         if b"INTERACTION_CREATE" not in (msg if isinstance(msg, bytes) else msg.encode()):
             return
         try:
@@ -330,5 +405,27 @@ async def on_app_command_error(interaction: discord.Interaction, error: app_comm
         pass
 
 
+async def main() -> None:
+    async with bot:  # closes the bot (and our aiohttp session) on the way out
+        if sys.platform != "win32":
+            # systemctl stop sends SIGTERM; shut down cleanly instead of being killed mid-request.
+            loop = asyncio.get_running_loop()
+            for sig in (signal.SIGTERM, signal.SIGINT):
+                loop.add_signal_handler(sig, lambda s=sig: _request_shutdown(s))
+        await bot.start(DISCORD_TOKEN)
+
+
+def _request_shutdown(sig: signal.Signals) -> None:
+    log.info("Received %s, shutting down", sig.name)
+    asyncio.get_running_loop().create_task(bot.close())
+
+
 if __name__ == "__main__":
-    bot.run(DISCORD_TOKEN, log_handler=None)
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:  # Ctrl+C on Windows, where asyncio has no signal handlers
+        log.info("Interrupted, shut down")
+    except discord.LoginFailure:
+        _config_error("Discord rejected DISCORD_TOKEN (login failed). Check the token in .env.")
+    except discord.PrivilegedIntentsRequired:
+        _config_error("Discord refused the requested intents.")
