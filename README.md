@@ -18,13 +18,13 @@ You can fill in either option or both:
 
 - Only `roblox`: checks all six sources plus Rotector's linked-Discord data. Any Discord accounts Rotector links to it are then checked too.
 - Only `discord`: checks Rotector, TASE, Okappiki and ServerSweep. Any Roblox accounts those sources link to it are then checked too, which covers RAB and RCR. If nothing is linked, the header lists RAB and RCR as not checked, since they only cover Roblox.
-- Both: runs both checks at the same time and sends the Roblox results, then the Discord results, each with its own header. Roblox-only sources (RAB and RCR) appear only in the Roblox results. If Rayward links the two accounts, the headers say so and name the source. Otherwise the bot says nothing about a link, since a missing link doesn't prove the accounts are unrelated.
+- Both: runs both checks at the same time. If Rayward links the two accounts, the header says so and names the source. Otherwise the bot says nothing about a link, since a missing link doesn't prove the accounts are unrelated.
 - Neither, in a 1-on-1 DM: checks the person you're talking to, if Discord shares who that is.
 - Neither, anywhere else: the bot asks who to check. Group DMs and servers never share their members, so use the right-click commands there.
 
 If either value isn't a valid username, ID or mention, the bot replies with an error and runs neither check.
 
-Linked accounts are checked automatically only when you fill in one side. The account you typed comes first, then each linked account, with a header saying which source linked it. The bot follows up to 3 linked accounts (set by `AUTO_LINK_MAX`) and lists any others by ID without checking them. It doesn't follow links from the linked accounts, and it skips Discord IDs that Rayward has partly hidden, since those can't be looked up. The right-click commands and the DM default follow links the same way.
+Linked accounts are checked automatically only when you fill in one side. The header lists the account you typed first, then each linked account with the source that linked it. The bot follows up to 3 linked accounts (set by `AUTO_LINK_MAX`) and lists any others by ID without checking them. It doesn't follow links from the linked accounts, and it skips Discord IDs that Rayward has partly hidden, since those can't be looked up. The right-click commands and the DM default follow links the same way.
 
 ### Right-click commands
 
@@ -35,16 +35,16 @@ Right-click a user or a message and open **Apps**:
 
 These work in servers, DMs and group DMs. Discord doesn't allow options on right-click commands, so the results are always private.
 
-### Colours
+### How results look
 
-Each source gets its own card with a coloured side bar, and the card title names the result in words, for example "TASE database - No record". The header lists every source's result on one line in plain text.
+Results come as one header followed by one card per source. The header lists every checked account and every source's result on one line. When more than one account was checked, each source's card has a section per account, so Rotector's Roblox finding, its linked Discord accounts and its Discord finding all sit in the Rotector card. Sources only appear for accounts they cover, so RAB and RCR only show Roblox sections.
+
+Each card has a coloured side bar, and its title names the result in words, for example "TASE database - No record". A card covering several accounts takes the worst result among them.
 
 - Red: flagged or confirmed, an actual finding.
 - Orange: a process state such as queued, provisional or awaiting review, or an RCR Watch.
 - Green: no record in that source, which is not the same as safe.
 - Purple: the source errored or didn't answer, so its result is unknown.
-- Blue: Rotector found linked Discord or alt accounts.
-- Grey: Rotector has no linked Discord or alt accounts on record.
 
 ### RCR records
 

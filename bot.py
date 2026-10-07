@@ -337,74 +337,80 @@ def accounts_linked(
     if links.ok:
         ids = {str(acc.get("id")) for acc in (links.data or {}).get("discordAccounts") or []}
         if discord_id in ids:
-            sources.append(f"{links.provider.name} linked-Discord data")
+            sources.append(links.provider.name)
     for r in discord_results:
         if not r.ok:
             continue
         linked = (r.data or {}).get("linkedRobloxAccounts") or []
-        if any(str(acc.get("robloxUserId")) == str(roblox_id) for acc in linked):
+        if any(str(acc.get("robloxUserId")) == str(roblox_id) for acc in linked) and r.provider.name not in sources:
             sources.append(r.provider.name)
     return sources
 
 
-def build_roblox_block(
-    target: RobloxUser, results: list[LookupResult], links: LookupResult, notes: list[str],
-) -> tuple[discord.Embed, list[embeds.Section]]:
-    if target.name:
-        title = f"{target.display_name or target.name} (@{target.name})"
-    else:
-        title = f"Roblox user {target.id}"
-    sections = embeds.provider_sections(results)
-    sections.insert(1, embeds.Section(
-        "Rotector - linked Discord", embeds.format_rotector_links(links), embeds.links_status(links),
-    ))
+@dataclass
+class Checked:
+    """One checked account: its card subject plus the identity lines for the shared header."""
+    subject: embeds.Subject
+    title: str
+    lines: list[str]
+    url: str | None = None
+    avatar: str | None = None
 
-    header = discord.Embed(
-        title=discord.utils.escape_markdown(title),
-        url=target.profile_url,
-        color=embeds.overall_color(results),
-    )
-    desc = [f"**Roblox ID:** `{target.id}`"]
+
+def _created(dt: Any) -> str:
+    return f"created {discord.utils.format_dt(dt, 'D')} ({discord.utils.format_dt(dt, 'R')})"
+
+
+def roblox_checked(target: RobloxUser, results: list[LookupResult], links: LookupResult) -> Checked:
+    name = f"{target.display_name or target.name} (@{target.name})" if target.name else f"Roblox user {target.id}"
+    line = f"**Roblox:** [{discord.utils.escape_markdown(name)}]({target.profile_url}) `{target.id}`"
     created = embeds.parse_iso(target.created)
     if created:
-        desc.append(f"**Created:** {discord.utils.format_dt(created, 'D')} ({discord.utils.format_dt(created, 'R')})")
+        line += f", {_created(created)}"
+    lines = [line]
     if target.is_banned:
-        desc.append("**Banned on Roblox:** yes")
+        lines.append("Banned on Roblox: yes")
     if not target.name:
-        desc.append("*Roblox profile unavailable; showing Rayward data by ID only.*")
-    desc += notes
-    desc += ["", embeds.summary_line(sections), f"-# {embeds.LEGEND}"]
-    header.description = "\n".join(desc)
-    if target.avatar_url:
-        header.set_thumbnail(url=target.avatar_url)
-    return header, sections
+        lines.append("*Roblox profile unavailable; showing Rayward data by ID only.*")
+    heading = f"Roblox @{target.name}" if target.name else f"Roblox {target.id}"
+    return Checked(embeds.Subject("roblox", heading, results, links), name, lines,
+                   url=target.profile_url, avatar=target.avatar_url)
 
 
-def build_discord_block(
-    raw: str, results: list[LookupResult], user: discord.User | None, notes: list[str],
-) -> tuple[discord.Embed, list[embeds.Section]]:
-    created = discord.utils.snowflake_time(int(raw))
+def discord_checked(raw: str, results: list[LookupResult], user: discord.User | None) -> Checked:
+    name = f"{user.global_name or user.name} (@{user.name})" if user else f"Discord user {raw}"
+    line = f"**Discord:** <@{raw}>"
     if user:
-        title = f"{user.global_name or user.name} (@{user.name})"
-    else:
-        title = f"Discord user {raw}"
-    sections = embeds.provider_sections(results)
-
-    header = discord.Embed(title=discord.utils.escape_markdown(title), color=embeds.overall_color(results))
-    desc = [
-        f"**Discord ID:** `{raw}`",
-        f"**Created:** {discord.utils.format_dt(created, 'D')} ({discord.utils.format_dt(created, 'R')})",
-        f"**Mention:** <@{raw}>",
-    ]
+        line += f" {discord.utils.escape_markdown(name)}"
+    line += f" `{raw}`, {_created(discord.utils.snowflake_time(int(raw)))}"
+    lines = [line]
     if user and user.bot:
-        desc.append("**Bot account:** yes")
+        lines.append("Bot account: yes")
     if not user:
-        desc.append("*Discord profile could not be fetched.*")
+        lines.append("*Discord profile could not be fetched.*")
+    heading = f"Discord @{user.name}" if user else f"Discord {raw}"
+    return Checked(embeds.Subject("discord", heading, results), name, lines,
+                   avatar=user.display_avatar.url if user else None)
+
+
+def build_result(checked: list[Checked], notes: list[str]) -> embeds.Block:
+    """One header listing every checked account, then one card per source covering all of them."""
+    sections = embeds.source_sections([c.subject for c in checked])
+    primary = checked[0]
+    header = discord.Embed(
+        title=discord.utils.escape_markdown(primary.title),
+        url=primary.url,
+        color=embeds.overall_color(r for c in checked for r in c.subject.results),
+    )
+    desc: list[str] = []
+    for c in checked:
+        desc += c.lines
     desc += notes
     desc += ["", embeds.summary_line(sections), f"-# {embeds.LEGEND}"]
     header.description = "\n".join(desc)
-    if user:
-        header.set_thumbnail(url=user.display_avatar.url)
+    avatar = next((c.avatar for c in checked if c.avatar), None)
+    if avatar:
+        header.set_thumbnail(url=avatar)
     return header, sections
 
 
@@ -415,7 +421,7 @@ async def run_checks(
     discord_id: str | None = None,
     known: discord.User | None = None,
 ) -> None:
-    """Run a Roblox check, a Discord check, or both concurrently, and send the results.
+    """Run a Roblox check, a Discord check, or both concurrently, and send one combined result.
 
     When only one side is given, accounts that Rayward links to it on the other side are
     checked too (up to AUTO_LINK_MAX), so the user gets both sides in one go.
@@ -436,77 +442,63 @@ async def run_checks(
         jobs.append(fetch_discord(discord_id, known))
     out = await asyncio.gather(*jobs)
 
-    r_results: list[LookupResult] = []
+    checked: list[Checked] = []
     links = LookupResult(ROTECTOR, error="Not requested")
-    if target is not None:
-        r_results, links = out[0]
     d_results: list[LookupResult] = []
     d_user: discord.User | None = None
+    if target is not None:
+        r_results, links = out[0]
+        checked.append(roblox_checked(target, r_results, links))
     if discord_id is not None:
         d_results, d_user = out[-1]
+        checked.append(discord_checked(discord_id, d_results, d_user))
 
     notes: list[str] = []
     if target is not None and discord_id is not None:
         sources = accounts_linked(target.id, discord_id, links, d_results)
         if sources:
-            notes = [f"**Linked:** Rayward links this Roblox and Discord account ({', '.join(sources)})."]
+            notes.append(f"**Linked:** Rayward links this Roblox and Discord account ({', '.join(sources)}).")
 
     # One side given: follow what Rayward links to it on the other side. Never chained.
     follow_kind: Kind | None = None
     candidates: list[LinkedAccount] = []
-    origin = ""
     if AUTO_LINK_MAX > 0 and target is not None and discord_id is None:
         follow_kind, candidates = "discord", linked_discord_accounts(links)
-        origin = f"Roblox user {target.name or target.id}"
     elif AUTO_LINK_MAX > 0 and discord_id is not None and target is None:
         follow_kind, candidates = "roblox", linked_roblox_accounts(d_results)
-        origin = f"Discord user {d_user.name if d_user else discord_id}"
     followed, extra = candidates[:AUTO_LINK_MAX], candidates[AUTO_LINK_MAX:]
 
-    async def follow(acc: LinkedAccount) -> embeds.Block:
-        note = f"**Auto-checked:** linked to {discord.utils.escape_markdown(origin)} via {', '.join(acc.sources)}."
+    async def follow(acc: LinkedAccount) -> Checked:
         if follow_kind == "roblox":
             user = RobloxUser(id=int(acc.id), name=acc.name)
             res, lk = await fetch_roblox(user)
-            return build_roblox_block(user, res, lk, [note])
-        res, u = await fetch_discord(acc.id, None)
-        return build_discord_block(acc.id, res, u, [note])
+            c = roblox_checked(user, res, lk)
+        else:
+            res, u = await fetch_discord(acc.id, None)
+            c = discord_checked(acc.id, res, u)
+        c.lines.append(f"-# Linked via {', '.join(acc.sources)}, checked automatically")
+        return c
 
     follow_out = await asyncio.gather(*(follow(a) for a in followed), return_exceptions=True)
-    follow_blocks: list[embeds.Block] = []
     failed: list[LinkedAccount] = []
     for acc, result in zip(followed, follow_out):
         if isinstance(result, BaseException):
             log.warning("Auto-check of linked account %s failed", acc.id, exc_info=result)
             failed.append(acc)
         else:
-            follow_blocks.append(result)
+            checked.append(result)
 
-    # Sources that suit none of the checked account types (e.g. Roblox-only ones on a
-    # Discord-only check) get no card, just one line in the first header.
-    kinds: set[Kind] = set()
-    if target is not None or (follow_kind == "roblox" and follow_blocks):
-        kinds.add("roblox")
-    if discord_id is not None or (follow_kind == "discord" and follow_blocks):
-        kinds.add("discord")
-    skipped = embeds.not_checked_line(kinds)
-
-    first_notes = list(notes)
     if extra:
-        first_notes.append(f"Also linked, not checked (limit {AUTO_LINK_MAX}): {_id_list(extra)}")
+        notes.append(f"Also linked, not checked (limit {AUTO_LINK_MAX}): {_id_list(extra)}")
     if failed:
-        first_notes.append(f"Could not check linked: {_id_list(failed)}")
+        notes.append(f"Could not check linked: {_id_list(failed)}")
+    # Sources that suit none of the checked accounts (e.g. Roblox-only ones when only Discord
+    # accounts were checked) get no card, just this line.
+    skipped = embeds.not_checked_line({c.subject.kind for c in checked})
     if skipped:
-        first_notes.append(f"-# {skipped}")
+        notes.append(f"-# {skipped}")
 
-    blocks: list[embeds.Block] = []
-    if target is not None:
-        blocks.append(build_roblox_block(target, r_results, links, first_notes))
-    if discord_id is not None:
-        blocks.append(build_discord_block(discord_id, d_results, d_user, notes if blocks else first_notes))
-    blocks += follow_blocks
-
-    await send_messages(interaction, embeds.build_messages(*blocks), ephemeral)
+    await send_messages(interaction, embeds.build_messages(build_result(checked, notes)), ephemeral)
 
 
 async def check_discord(

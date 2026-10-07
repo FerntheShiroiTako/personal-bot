@@ -10,7 +10,7 @@ from typing import Any, Iterable, List, Tuple
 import discord
 from discord.utils import escape_markdown
 
-from rayward import PROVIDERS, Kind, LookupResult
+from rayward import PROVIDERS, ROTECTOR, Kind, LookupResult
 
 # Discord limits
 MAX_EMBEDS = 10
@@ -114,7 +114,7 @@ def _evidence_line(item: dict[str, Any]) -> str | None:
     return None  # unknown kinds are skipped, as the docs require
 
 
-def format_result(result: LookupResult) -> str:
+def format_result(result: LookupResult, limit: int = MAX_DESCRIPTION) -> str:
     if not result.ok:
         return f"**Error** - {_esc(result.error)}"
 
@@ -168,10 +168,10 @@ def format_result(result: LookupResult) -> str:
     if _ts(d.get("lastUpdated")):
         lines.append(f"Updated {_ts(d.get('lastUpdated'))}")
 
-    return _fit_lines(lines)
+    return _fit_lines(lines, limit)
 
 
-def format_rotector_links(result: LookupResult) -> str:
+def format_rotector_links(result: LookupResult, limit: int = MAX_DESCRIPTION) -> str:
     if not result.ok:
         return f"**Error** - {_esc(result.error)}"
     d = result.data or {}
@@ -202,15 +202,15 @@ def format_rotector_links(result: LookupResult) -> str:
             )
         if len(alts) > MAX_LINKED:
             lines.append(f"  … +{len(alts) - MAX_LINKED} more")
-    return _fit_lines(lines)
+    return _fit_lines(lines, limit)
 
 
-def format_rcr(result: LookupResult) -> str:
+def format_rcr(result: LookupResult, limit: int = MAX_DESCRIPTION) -> str:
     """Roblox Criminal Records. Same response shape as the others, but its terms say a record is
     an accusation filed by RCR staff rather than a finding, so it is worded that way, and the
     full filings live on RCR's own site (recordUrls)."""
     if not result.ok:
-        return format_result(result)
+        return format_result(result, limit)
     d = result.data or {}
     flag = d.get("flagType", 0)
     lines: list[str] = []
@@ -242,7 +242,7 @@ def format_rcr(result: LookupResult) -> str:
         lines.append(f"Full records on RCR: {links}")
     if _ts(d.get("lastUpdated")):
         lines.append(f"Record updated {_ts(d.get('lastUpdated'))}")
-    return _fit_lines(lines)
+    return _fit_lines(lines, limit)
 
 
 @dataclass(frozen=True)
@@ -255,8 +255,7 @@ HIT = Status("Flagged", discord.Color.red())
 PROCESS = Status("Under review", discord.Color.orange())
 CLEAR = Status("No record", discord.Color.green())
 ERROR = Status("Error", discord.Color.purple())
-INFO = Status("Links found", discord.Color.blue())
-NONE_LINKED = Status("None linked", discord.Color.light_grey())
+SEVERITY = (HIT, PROCESS, ERROR, CLEAR)  # worst first; a card shared by several accounts takes the worst
 
 LEGEND = "Card colours: red flagged, orange under review, green no record, purple error"
 
@@ -279,16 +278,9 @@ def result_status(result: LookupResult) -> Status:
     return PROCESS if flag else CLEAR
 
 
-def links_status(result: LookupResult) -> Status:
-    if not result.ok:
-        return ERROR
-    d = result.data or {}
-    return INFO if d.get("discordAccounts") or d.get("altAccounts") else NONE_LINKED
-
-
 def overall_color(results: Iterable[LookupResult]) -> discord.Color:
     statuses = {result_status(r) for r in results}
-    for status in (HIT, PROCESS, ERROR):
+    for status in SEVERITY:
         if status in statuses:
             return status.color
     return CLEAR.color
@@ -304,12 +296,51 @@ def _card_label(r: LookupResult) -> str | None:
     return flag_name(d.get("flagType"))
 
 
-def provider_sections(results: list[LookupResult]) -> list[Section]:
-    """One section per lookup that ran. Sources that can't do this lookup type get no card."""
+@dataclass
+class Subject:
+    """One checked account: its lookup results and how to name it inside a source's card."""
+    kind: Kind
+    heading: str  # e.g. "Roblox @webbedink"
+    results: list[LookupResult]
+    links: LookupResult | None = None  # Rotector's linked-Discord data, Roblox accounts only
+
+
+def _subject_body(provider_id: str, subject: Subject, result: LookupResult, limit: int) -> str:
+    if provider_id == "rcr" and result.ok:
+        return format_rcr(result, limit)
+    links = subject.links if provider_id == ROTECTOR.id else None
+    show_links = links is not None and (
+        not links.ok or (links.data or {}).get("discordAccounts") or (links.data or {}).get("altAccounts")
+    )
+    if not show_links:
+        return format_result(result, limit)
+    body = format_result(result, limit * 2 // 3)
+    return body + "\n**Linked Discord accounts**\n" + format_rotector_links(links, limit - len(body) - 30)
+
+
+def source_sections(subjects: list[Subject]) -> list[Section]:
+    """One card per source, holding that source's results for every checked account.
+
+    Sources that suit none of the accounts get no card. With more than one account, each
+    account gets its own heading inside the card, and the card takes its worst result."""
     sections = []
-    for r in results:
-        body = format_rcr(r) if r.provider.id == "rcr" and r.ok else format_result(r)
-        sections.append(Section(r.provider.card_title, body, result_status(r), _card_label(r), short=r.provider.name))
+    multi = len(subjects) > 1
+    for provider in PROVIDERS:
+        parts = [(s, r) for s in subjects for r in s.results if r.provider.id == provider.id]
+        if not parts:
+            continue
+        heading_room = 80 if multi else 0
+        limit = (MAX_DESCRIPTION - 4 * len(parts)) // len(parts) - heading_room
+        chunks = []
+        for subject, result in parts:
+            body = _subject_body(provider.id, subject, result, limit)
+            chunks.append(f"__**{_esc(subject.heading)}**__\n{body}" if multi else body)
+
+        worst = min(parts, key=lambda p: SEVERITY.index(result_status(p[1])))[1]
+        sections.append(Section(
+            provider.card_title, _clip("\n\n".join(chunks), MAX_DESCRIPTION),
+            result_status(worst), _card_label(worst), short=provider.name,
+        ))
     return sections
 
 
