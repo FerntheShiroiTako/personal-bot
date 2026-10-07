@@ -4,7 +4,7 @@ A private Discord bot for Roblox and Discord lookups across the five Rayward sou
 
 ## Commands
 
-One command does everything:
+Lookups go through one slash command:
 
 ```
 /check [roblox] [discord] [visibility]
@@ -16,11 +16,11 @@ One command does everything:
 
 You can fill in either option or both:
 
-- **Only `roblox`:** checks all five sources plus Rotector's linked-Discord data.
-- **Only `discord`:** checks Rotector, TASE, Okappiki and ServerSweep. RAB has no Discord lookup.
-- **Both:** runs both checks at the same time. You get the Roblox results first, then the Discord results, each with its own header. If Rayward links the two accounts, the headers say so and name the source. If it doesn't, the bot says nothing. No link on record doesn't prove the accounts are unrelated.
-- **Neither, in a 1-on-1 DM:** checks the person you're talking to, if Discord shares who that is.
-- **Neither, anywhere else:** the bot asks you who to check. Group DMs and servers never share their members, so use the right-click commands there.
+- Only `roblox`: checks all five sources plus Rotector's linked-Discord data.
+- Only `discord`: checks Rotector, TASE, Okappiki and ServerSweep. RAB has no Discord lookup.
+- Both: runs both checks at the same time and sends the Roblox results, then the Discord results, each with its own header. If Rayward links the two accounts, the headers say so and name the source. Otherwise the bot says nothing about a link, since a missing link doesn't prove the accounts are unrelated.
+- Neither, in a 1-on-1 DM: checks the person you're talking to, if Discord shares who that is.
+- Neither, anywhere else: the bot asks who to check. Group DMs and servers never share their members, so use the right-click commands there.
 
 If either value isn't a valid username, ID or mention, the bot replies with an error and runs neither check.
 
@@ -37,12 +37,12 @@ These work in servers, DMs and group DMs. Discord doesn't allow options on right
 
 Each source gets its own card with a coloured side bar, and the card title names the result in words, for example "TASE database - No record". The header lists every source's result on one line in plain text.
 
-- **Red:** flagged or confirmed (an actual finding).
-- **Orange:** a process state such as queued, provisional or awaiting review.
-- **Green:** no record in that source. This does not mean the account is safe.
-- **Purple:** the source errored or didn't answer. This does not mean the account is clean.
-- **Blue:** Rotector found linked Discord or alt accounts.
-- **Grey:** the source doesn't support this lookup, or nothing was linked.
+- Red: flagged or confirmed, an actual finding.
+- Orange: a process state such as queued, provisional or awaiting review.
+- Green: no record in that source, which is not the same as safe.
+- Purple: the source errored or didn't answer, so its result is unknown.
+- Blue: Rotector found linked Discord or alt accounts.
+- Grey: the source doesn't support this lookup, or nothing was linked.
 
 ## Setup
 
@@ -146,6 +146,6 @@ If the token or another `.env` value is missing or invalid, the bot exits with c
 ## Notes
 
 - Rayward's terms say not to store responses for more than 24 hours. This bot stores nothing.
-- "Unflagged" means a source has no record of the account. It does not mean the account is safe. Only Flagged and Confirmed are findings.
+- "Unflagged" means a source has no record of the account. Only Flagged and Confirmed are findings.
 - A 503 error means the source did not answer. The bot then shows that source as errored, never as clean.
 - Rayward hides parts of Discord IDs in evidence when you use a developer key.
