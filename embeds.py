@@ -14,7 +14,7 @@ from rayward import PROVIDERS, Kind, LookupResult
 
 # Discord limits
 MAX_EMBEDS = 10
-MAX_FIELD_VALUE = 1024
+MAX_DESCRIPTION = 4096  # each source is its own embed, so its body gets the full description limit
 MAX_EMBED_TOTAL = 6000
 EMBED_BUDGET = 5600  # headroom for the footer
 
@@ -33,9 +33,11 @@ ACTIONABLE = {1, 2}  # per Rayward docs, only these mean the account did somethi
 
 FOOTER = "Via Rayward. Green means no record, not safe."
 
-MAX_REASONS = 5
-MAX_EVIDENCE_PER_REASON = 4
-MAX_LINKED = 5
+# Generous caps; _fit_lines still trims to Discord's limit with a "+N more lines" note.
+MAX_REASONS = 15
+MAX_EVIDENCE_PER_REASON = 40
+MAX_LINKED = 15
+MAX_SERVER_NAMES = 25
 
 
 def _esc(value: Any) -> str:
@@ -46,7 +48,7 @@ def _clip(text: str, limit: int) -> str:
     return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
-def _fit_lines(lines: list[str], limit: int = MAX_FIELD_VALUE) -> str:
+def _fit_lines(lines: list[str], limit: int = MAX_DESCRIPTION) -> str:
     """Join lines, dropping whole lines at the end (with a note) if over the limit."""
     out: list[str] = []
     used = 0
@@ -186,8 +188,8 @@ def format_rotector_links(result: LookupResult) -> str:
             line += f" (seen {_ts(acc.get('detectedAt'), 'd')})"
         lines.append(line)
         if servers:
-            names = ", ".join(_esc(s.get("safeName", "?")) for s in servers[:6])
-            more = f" +{len(servers) - 6}" if len(servers) > 6 else ""
+            names = ", ".join(_esc(s.get("safeName", "?")) for s in servers[:MAX_SERVER_NAMES])
+            more = f" +{len(servers) - MAX_SERVER_NAMES}" if len(servers) > MAX_SERVER_NAMES else ""
             lines.append(f"  {len(servers)} tracked server(s): {names}{more}")
     if len(accounts) > MAX_LINKED:
         lines.append(f"… +{len(accounts) - MAX_LINKED} more Discord accounts")
@@ -347,7 +349,7 @@ def build_messages(*blocks: Block) -> list[list[discord.Embed]]:
         cards = [header]
         for s in sections:
             title = _clip(f"{s.name} - {s.label or s.status.label}", 256)
-            cards.append(discord.Embed(title=title, description=_clip(s.value or "-", MAX_FIELD_VALUE), color=s.status.color))
+            cards.append(discord.Embed(title=title, description=_clip(s.value or "-", MAX_DESCRIPTION), color=s.status.color))
 
         messages.append([])
         used = 0
