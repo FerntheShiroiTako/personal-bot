@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, Iterable
+from typing import Any, Iterable, List, Tuple
 
 import discord
 from discord.utils import escape_markdown
@@ -205,19 +205,19 @@ def format_rotector_links(result: LookupResult) -> str:
 
 @dataclass(frozen=True)
 class Status:
-    emoji: str
     label: str
     color: discord.Color
 
 
-HIT = Status("\N{LARGE RED CIRCLE}", "Flagged", discord.Color.red())
-PROCESS = Status("\N{LARGE ORANGE CIRCLE}", "Under review", discord.Color.orange())
-CLEAR = Status("\N{LARGE GREEN CIRCLE}", "No record", discord.Color.green())
-ERROR = Status("\N{LARGE PURPLE CIRCLE}", "Error", discord.Color.purple())
-INFO = Status("\N{LARGE BLUE CIRCLE}", "Links found", discord.Color.blue())
-NA = Status("\N{MEDIUM WHITE CIRCLE}", "Not supported", discord.Color.light_grey())
+HIT = Status("Flagged", discord.Color.red())
+PROCESS = Status("Under review", discord.Color.orange())
+CLEAR = Status("No record", discord.Color.green())
+ERROR = Status("Error", discord.Color.purple())
+INFO = Status("Links found", discord.Color.blue())
+NA = Status("Not supported", discord.Color.light_grey())
+NONE_LINKED = Status("None linked", discord.Color.light_grey())
 
-LEGEND = "\N{LARGE RED CIRCLE} flagged  \N{LARGE ORANGE CIRCLE} under review  \N{LARGE GREEN CIRCLE} no record  \N{LARGE PURPLE CIRCLE} error"
+LEGEND = "Card colours: red flagged, orange under review, green no record, purple error"
 
 
 @dataclass
@@ -241,7 +241,7 @@ def links_status(result: LookupResult) -> Status:
     if not result.ok:
         return ERROR
     d = result.data or {}
-    return INFO if d.get("discordAccounts") or d.get("altAccounts") else NA
+    return INFO if d.get("discordAccounts") or d.get("altAccounts") else NONE_LINKED
 
 
 def overall_color(results: Iterable[LookupResult]) -> discord.Color:
@@ -265,29 +265,37 @@ def provider_sections(results: list[LookupResult], kind: Kind) -> list[Section]:
 
 
 def summary_line(sections: list[Section]) -> str:
-    return "  ".join(f"{s.status.emoji} {s.name.removesuffix(' database')}" for s in sections)
+    """Plain-text status per source, e.g. "Rotector: Confirmed | TASE: No record"."""
+    return " | ".join(f"{s.name.removesuffix(' database')}: {s.label or s.status.label}" for s in sections)
 
 
-def build_messages(header: discord.Embed, sections: list[Section]) -> list[list[discord.Embed]]:
+Block = Tuple[discord.Embed, List[Section]]
+
+
+def build_messages(*blocks: Block) -> list[list[discord.Embed]]:
     """One colour-coded embed per section, grouped into messages within Discord's limits.
 
-    Each inner list is one message: at most 10 embeds and ~6000 characters combined.
+    Each block is (header, sections). Every block starts a new message, so with both a
+    Roblox and a Discord check the Discord results never share a message with the Roblox
+    ones. Each inner list is one message: at most 10 embeds and ~6000 characters combined.
     """
     now = discord.utils.utcnow()
-    embeds = [header]
-    for s in sections:
-        title = _clip(f"{s.status.emoji} {s.name} - {s.label or s.status.label}", 256)
-        embeds.append(discord.Embed(title=title, description=_clip(s.value or "-", MAX_FIELD_VALUE), color=s.status.color))
+    messages: list[list[discord.Embed]] = []
+    for header, sections in blocks:
+        cards = [header]
+        for s in sections:
+            title = _clip(f"{s.name} - {s.label or s.status.label}", 256)
+            cards.append(discord.Embed(title=title, description=_clip(s.value or "-", MAX_FIELD_VALUE), color=s.status.color))
 
-    messages: list[list[discord.Embed]] = [[]]
-    used = 0
-    for embed in embeds:
-        size = len(embed)
-        if messages[-1] and (len(messages[-1]) >= MAX_EMBEDS or used + size > EMBED_BUDGET):
-            messages.append([])
-            used = 0
-        messages[-1].append(embed)
-        used += size
+        messages.append([])
+        used = 0
+        for embed in cards:
+            size = len(embed)
+            if messages[-1] and (len(messages[-1]) >= MAX_EMBEDS or used + size > EMBED_BUDGET):
+                messages.append([])
+                used = 0
+            messages[-1].append(embed)
+            used += size
 
     total = len(messages)
     for i, group in enumerate(messages, 1):

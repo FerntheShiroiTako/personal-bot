@@ -14,7 +14,7 @@ import re
 import signal
 import sys
 from pathlib import Path
-from typing import Union
+from typing import Any, Coroutine, Union
 
 import aiohttp
 import discord
@@ -199,6 +199,23 @@ def dm_partner(interaction: discord.Interaction) -> discord.User | None:
     return others[0] if len(others) == 1 else None
 
 
+def normalize_roblox(value: str) -> str | None:
+    """Format-check a Roblox username or ID without any network calls. None if invalid."""
+    q = value.strip().lstrip("@")
+    if (q.isdigit() and len(q) <= 20) or ROBLOX_USERNAME_RE.match(q):
+        return q
+    return None
+
+
+def normalize_discord(value: str) -> str | None:
+    """A Discord user ID from an ID or <@mention>. None if invalid."""
+    q = value.strip()
+    mention = MENTION_RE.match(q)
+    if mention:
+        return mention.group(1)
+    return q if SNOWFLAKE_RE.match(q) else None
+
+
 async def resolve_roblox(query: str) -> tuple[RobloxUser | None, str | None]:
     """Returns (user, error). The user may have only an id if Roblox was unreachable."""
     q = query.strip().lstrip("@")
@@ -227,30 +244,52 @@ async def resolve_roblox(query: str) -> tuple[RobloxUser | None, str | None]:
     return user, None
 
 
-async def check_roblox(interaction: discord.Interaction, query: str, ephemeral: bool) -> None:
-    target, error = await resolve_roblox(query)
-    if error or target is None:
-        await send_error(interaction, error or "Lookup failed.")
-        return
-
-    needs_details = target.created is None
-    results, links, avatar, details = await asyncio.gather(
+def roblox_coros(target: RobloxUser) -> list[Coroutine[Any, Any, Any]]:
+    """Results come back as (results, links, avatar, details)."""
+    return [
         bot.rayward.lookup_all("roblox", target.id),
         bot.rayward.rotector_discord_links(target.id),
         bot.roblox.get_headshot(target.id),
-        bot.roblox.get_user(target.id) if needs_details else asyncio.sleep(0, result=None),
-        return_exceptions=True,
-    )
-    if isinstance(results, BaseException):  # lookup_all never raises, but be defensive
-        results = []
-    if isinstance(links, BaseException):
-        links = LookupResult(ROTECTOR, error=f"Unexpected error: {type(links).__name__}")
-    if isinstance(details, RobloxUser):
-        target.created, target.is_banned = details.created, details.is_banned
-        target.name = target.name or details.name
-        target.display_name = target.display_name or details.display_name
-    target.avatar_url = avatar if isinstance(avatar, str) else None
+        bot.roblox.get_user(target.id) if target.created is None else asyncio.sleep(0, result=None),
+    ]
 
+
+def discord_coros(raw: str, known: discord.User | None) -> list[Coroutine[Any, Any, Any]]:
+    """Results come back as (results, user)."""
+    async def fetch_discord_user() -> discord.User | None:
+        try:
+            return await bot.fetch_user(int(raw))
+        except discord.HTTPException:
+            return known
+
+    return [bot.rayward.lookup_all("discord", raw), fetch_discord_user()]
+
+
+def _lookup_list(value: Any) -> list[LookupResult]:
+    return value if isinstance(value, list) else []  # lookup_all never raises, but be defensive
+
+
+def accounts_linked(
+    roblox_id: int, discord_id: str, links: LookupResult, discord_results: list[LookupResult],
+) -> list[str]:
+    """Names of the sources that say this Roblox and Discord account are linked."""
+    sources: list[str] = []
+    if links.ok:
+        ids = {str(acc.get("id")) for acc in (links.data or {}).get("discordAccounts") or []}
+        if discord_id in ids:
+            sources.append(f"{links.provider.name} linked-Discord data")
+    for r in discord_results:
+        if not r.ok:
+            continue
+        linked = (r.data or {}).get("linkedRobloxAccounts") or []
+        if any(str(acc.get("robloxUserId")) == str(roblox_id) for acc in linked):
+            sources.append(r.provider.name)
+    return sources
+
+
+def build_roblox_block(
+    target: RobloxUser, results: list[LookupResult], links: LookupResult, notes: list[str],
+) -> tuple[discord.Embed, list[embeds.Section]]:
     if target.name:
         title = f"{target.display_name or target.name} (@{target.name})"
     else:
@@ -273,32 +312,20 @@ async def check_roblox(interaction: discord.Interaction, query: str, ephemeral: 
         desc.append("**Banned on Roblox:** yes")
     if not target.name:
         desc.append("*Roblox profile unavailable; showing Rayward data by ID only.*")
+    desc += notes
     desc += ["", embeds.summary_line(sections), f"-# {embeds.LEGEND}"]
     header.description = "\n".join(desc)
     if target.avatar_url:
         header.set_thumbnail(url=target.avatar_url)
+    return header, sections
 
-    await send_messages(interaction, embeds.build_messages(header, sections), ephemeral)
 
-
-async def check_discord(
-    interaction: discord.Interaction, raw: str, ephemeral: bool, known: discord.User | None = None,
-) -> None:
-    async def fetch_discord_user() -> discord.User | None:
-        try:
-            return await bot.fetch_user(int(raw))
-        except (discord.NotFound, discord.HTTPException):
-            return known
-
-    results, user = await asyncio.gather(
-        bot.rayward.lookup_all("discord", raw),
-        fetch_discord_user(),
-    )
-
+def build_discord_block(
+    raw: str, results: list[LookupResult], user: discord.User | None, notes: list[str],
+) -> tuple[discord.Embed, list[embeds.Section]]:
     created = discord.utils.snowflake_time(int(raw))
     if user:
-        name = user.global_name or user.name
-        title = f"{name} (@{user.name})"
+        title = f"{user.global_name or user.name} (@{user.name})"
     else:
         title = f"Discord user {raw}"
     sections = embeds.provider_sections(results, "discord")
@@ -313,26 +340,90 @@ async def check_discord(
         desc.append("**Bot account:** yes")
     if not user:
         desc.append("*Discord profile could not be fetched.*")
+    desc += notes
     desc += ["", embeds.summary_line(sections), f"-# {embeds.LEGEND}"]
     header.description = "\n".join(desc)
     if user:
         header.set_thumbnail(url=user.display_avatar.url)
+    return header, sections
 
-    await send_messages(interaction, embeds.build_messages(header, sections), ephemeral)
+
+async def run_checks(
+    interaction: discord.Interaction,
+    ephemeral: bool,
+    roblox_query: str | None = None,
+    discord_id: str | None = None,
+    known: discord.User | None = None,
+) -> None:
+    """Run a Roblox check, a Discord check, or both concurrently, and send the results.
+
+    Expects the interaction to be deferred already. Inputs must be format-checked already.
+    """
+    target: RobloxUser | None = None
+    if roblox_query is not None:
+        target, error = await resolve_roblox(roblox_query)
+        if error or target is None:
+            await send_error(interaction, error or "Lookup failed.")
+            return
+
+    coros: list[Coroutine[Any, Any, Any]] = []
+    if target is not None:
+        coros += roblox_coros(target)
+    if discord_id is not None:
+        coros += discord_coros(discord_id, known)
+    out = list(await asyncio.gather(*coros, return_exceptions=True))
+
+    roblox_out = out[:4] if target is not None else []
+    discord_out = out[-2:] if discord_id is not None else []
+
+    blocks: list[tuple[discord.Embed, list[embeds.Section]]] = []
+    r_results: list[LookupResult] = []
+    links = LookupResult(ROTECTOR, error="Not requested")
+    if target is not None:
+        r_results, links, avatar, details = roblox_out
+        r_results = _lookup_list(r_results)
+        if isinstance(links, BaseException):
+            links = LookupResult(ROTECTOR, error=f"Unexpected error: {type(links).__name__}")
+        if isinstance(details, RobloxUser):
+            target.created, target.is_banned = details.created, details.is_banned
+            target.name = target.name or details.name
+            target.display_name = target.display_name or details.display_name
+        target.avatar_url = avatar if isinstance(avatar, str) else None
+
+    d_results: list[LookupResult] = []
+    d_user: discord.User | None = None
+    if discord_id is not None:
+        d_results = _lookup_list(discord_out[0])
+        d_user = discord_out[1] if isinstance(discord_out[1], discord.User) else known
+
+    notes: list[str] = []
+    if target is not None and discord_id is not None:
+        sources = accounts_linked(target.id, discord_id, links, d_results)
+        if sources:
+            notes = [f"**Linked:** Rayward links this Roblox and Discord account ({', '.join(sources)})."]
+
+    if target is not None:
+        blocks.append(build_roblox_block(target, r_results, links, notes))
+    if discord_id is not None:
+        blocks.append(build_discord_block(discord_id, d_results, d_user, notes))
+
+    await send_messages(interaction, embeds.build_messages(*blocks), ephemeral)
 
 
-@bot.tree.command(name="check", description="Check a Roblox or Discord user across all Rayward sources")
+async def check_discord(
+    interaction: discord.Interaction, raw: str, ephemeral: bool, known: discord.User | None = None,
+) -> None:
+    await run_checks(interaction, ephemeral, discord_id=raw, known=known)
+
+
+@bot.tree.command(name="check", description="Check a Roblox and/or Discord user across all Rayward sources")
 @app_commands.describe(
-    user="Roblox username/ID, or Discord ID/@mention. Leave empty in a DM to check who you're talking to",
-    platform="Which platform to check (default: auto-detect from what you typed)",
+    roblox="Roblox username or user ID",
+    discord_="Discord user ID or @mention. Leave both empty in a DM to check who you're talking to",
     visibility="Who can see the result (default: only you)",
 )
+@app_commands.rename(discord_="discord")
 @app_commands.choices(
-    platform=[
-        app_commands.Choice(name="Auto-detect", value="auto"),
-        app_commands.Choice(name="Roblox", value="roblox"),
-        app_commands.Choice(name="Discord", value="discord"),
-    ],
     visibility=[
         app_commands.Choice(name="Only me", value="me"),
         app_commands.Choice(name="Everyone in the channel", value="everyone"),
@@ -342,38 +433,37 @@ async def check_discord(
 @app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
 async def check_cmd(
     interaction: discord.Interaction,
-    user: app_commands.Range[str, 1, 40] | None = None,
-    platform: str = "auto",
+    roblox: app_commands.Range[str, 1, 40] | None = None,
+    discord_: app_commands.Range[str, 1, 40] | None = None,  # renamed: don't shadow the module
     visibility: str = "me",
 ) -> None:
     ephemeral = visibility != "everyone"
-    query = (user or "").strip()
-    partner: discord.User | None = None
+    roblox_in = (roblox or "").strip()
+    discord_in = (discord_ or "").strip()
 
-    if not query:
+    if not roblox_in and not discord_in:
         partner = dm_partner(interaction)
         if partner is None:
             await send_error(interaction, "Tell me who to check, or right-click them and use Apps > Check user.")
             return
-        if platform == "roblox":
-            await send_error(interaction, "I can only default to a DM partner's Discord account. Type a Roblox username for a Roblox check.")
-            return
-        query, platform = str(partner.id), "discord"
-
-    mention = MENTION_RE.match(query)
-    if platform == "auto":
-        platform = "discord" if mention or SNOWFLAKE_RE.match(query) else "roblox"
-
-    if platform == "discord":
-        raw = mention.group(1) if mention else query
-        if not SNOWFLAKE_RE.match(raw):
-            await send_error(interaction, "That is not a valid Discord user ID or mention.")
-            return
         await interaction.response.defer(ephemeral=ephemeral, thinking=True)
-        await check_discord(interaction, raw, ephemeral, known=partner)
-    else:
-        await interaction.response.defer(ephemeral=ephemeral, thinking=True)
-        await check_roblox(interaction, query, ephemeral)
+        await check_discord(interaction, str(partner.id), ephemeral, known=partner)
+        return
+
+    # Validate everything before deferring; if anything is invalid, run nothing.
+    roblox_query = normalize_roblox(roblox_in) if roblox_in else None
+    discord_id = normalize_discord(discord_in) if discord_in else None
+    problems = []
+    if roblox_in and roblox_query is None:
+        problems.append("`roblox` is not a valid Roblox username or user ID.")
+    if discord_in and discord_id is None:
+        problems.append("`discord` is not a valid Discord user ID or mention.")
+    if problems:
+        await send_error(interaction, "\n".join(problems))
+        return
+
+    await interaction.response.defer(ephemeral=ephemeral, thinking=True)
+    await run_checks(interaction, ephemeral, roblox_query=roblox_query, discord_id=discord_id)
 
 
 @bot.tree.context_menu(name="Check user")

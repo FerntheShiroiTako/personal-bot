@@ -7,14 +7,22 @@ A private Discord bot for Roblox and Discord lookups across the five Rayward sou
 One command does everything:
 
 ```
-/check [user] [platform] [visibility]
+/check [roblox] [discord] [visibility]
 ```
 
-- `user` is a Roblox username or ID, or a Discord ID or @mention. Leave it empty in a 1-on-1 DM to check the person you're talking to, if Discord shares who that is. Group DMs and servers never share their members, so use the right-click commands there.
-- `platform` can be Auto-detect (the default), Roblox or Discord. Auto-detect treats mentions and 15+ digit IDs as Discord and everything else as Roblox.
+- `roblox` is a Roblox username or user ID. The bot tries an all-digit value as an ID first. If no user has that ID, it tries the value as a username.
+- `discord` is a Discord user ID or @mention.
 - `visibility` can be Only me (the default) or Everyone in the channel. Errors are always private.
 
-Roblox checks cover all five sources plus Rotector's linked-Discord data. Discord checks cover Rotector, TASE, Okappiki and ServerSweep, because RAB has no Discord lookup.
+You can fill in either option or both:
+
+- **Only `roblox`:** checks all five sources plus Rotector's linked-Discord data.
+- **Only `discord`:** checks Rotector, TASE, Okappiki and ServerSweep. RAB has no Discord lookup.
+- **Both:** runs both checks at the same time. You get the Roblox results first, then the Discord results, each with its own header. If Rayward links the two accounts, the headers say so and name the source. If it doesn't, the bot says nothing. No link on record doesn't prove the accounts are unrelated.
+- **Neither, in a 1-on-1 DM:** checks the person you're talking to, if Discord shares who that is.
+- **Neither, anywhere else:** the bot asks you who to check. Group DMs and servers never share their members, so use the right-click commands there.
+
+If either value isn't a valid username, ID or mention, the bot replies with an error and runs neither check.
 
 ### Right-click commands
 
@@ -27,14 +35,14 @@ These work in servers, DMs and group DMs. Discord doesn't allow options on right
 
 ### Colours
 
-Each source gets its own coloured card, and the header shows a one-line summary:
+Each source gets its own card with a coloured side bar, and the card title names the result in words, for example "TASE database - No record". The header lists every source's result on one line in plain text.
 
-- 🔴 red: flagged or confirmed (an actual finding)
-- 🟠 orange: a process state such as queued, provisional or awaiting review
-- 🟢 green: no record in that source (this does not mean the account is safe)
-- 🟣 purple: the source errored or didn't answer (this does not mean the account is clean)
-- 🔵 blue: Rotector found linked Discord or alt accounts
-- ⚪ grey: the source doesn't support this lookup, or nothing was linked
+- **Red:** flagged or confirmed (an actual finding).
+- **Orange:** a process state such as queued, provisional or awaiting review.
+- **Green:** no record in that source. This does not mean the account is safe.
+- **Purple:** the source errored or didn't answer. This does not mean the account is clean.
+- **Blue:** Rotector found linked Discord or alt accounts.
+- **Grey:** the source doesn't support this lookup, or nothing was linked.
 
 ## Setup
 
