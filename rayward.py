@@ -1,10 +1,10 @@
-"""Async client for the Rayward lookup API (Rotector, TASE, RAB, Okappiki, ServerSweep).
+"""Async client for the Rayward lookup API (Rotector, TASE, RAB, Okappiki, ServerSweep, RCR).
 
 Reference: https://rayward.app/docs (OpenAPI specs at https://rayward.app/docs/<source>.json).
-All five sources share one host, one API key and one endpoint layout:
+All six sources share one host, one API key and one endpoint layout:
 
     GET {BASE_URL}/v2/lookup/{source}/roblox/user/{robloxId}
-    GET {BASE_URL}/v2/lookup/{source}/discord/user/{discordId}   (not RAB)
+    GET {BASE_URL}/v2/lookup/{source}/discord/user/{discordId}   (not RAB or RCR)
     GET {BASE_URL}/v2/lookup/rotector/roblox/user/{robloxId}/discord   (Rotector only)
 
 Success: {"success": true, "data": {...}}
@@ -31,6 +31,21 @@ class Provider:
     name: str
     roblox: bool
     discord: bool
+    # Card title. Each source's terms require its data to be labelled as coming from it.
+    title: str = ""
+
+    @property
+    def card_title(self) -> str:
+        return self.title or f"{self.name} database"
+
+    @property
+    def only_type(self) -> str | None:
+        """'Roblox' or 'Discord' for single-type sources, else None."""
+        if self.roblox and not self.discord:
+            return "Roblox"
+        if self.discord and not self.roblox:
+            return "Discord"
+        return None
 
     def supports(self, kind: Kind) -> bool:
         return self.roblox if kind == "roblox" else self.discord
@@ -42,6 +57,8 @@ PROVIDERS: tuple[Provider, ...] = (
     Provider("rab", "RAB", roblox=True, discord=False),
     Provider("okappiki", "Okappiki", roblox=True, discord=True),
     Provider("serversweep", "ServerSweep", roblox=True, discord=True),
+    # Roblox Criminal Records: staff-filed records on Roblox users. Roblox only.
+    Provider("rcr", "RCR", roblox=True, discord=False, title="Roblox Criminal Records (RCR)"),
 )
 ROTECTOR = PROVIDERS[0]
 

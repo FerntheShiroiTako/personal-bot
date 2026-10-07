@@ -1,6 +1,6 @@
 # Personal lookup bot
 
-A private Discord bot for Roblox and Discord lookups across the five Rayward sources: Rotector, TASE, RAB, Okappiki and ServerSweep. It installs to your own Discord account, so its commands work in any server, DM or group DM. Only the account set in `OWNER_ID` can use it.
+A private Discord bot for Roblox and Discord lookups across the six Rayward sources: Rotector, TASE, RAB, Okappiki, ServerSweep and RCR (Roblox Criminal Records). It installs to your own Discord account, so its commands work in any server, DM or group DM. Only the account set in `OWNER_ID` can use it.
 
 ## Commands
 
@@ -16,13 +16,15 @@ Lookups go through one slash command:
 
 You can fill in either option or both:
 
-- Only `roblox`: checks all five sources plus Rotector's linked-Discord data.
-- Only `discord`: checks Rotector, TASE, Okappiki and ServerSweep. RAB has no Discord lookup.
-- Both: runs both checks at the same time and sends the Roblox results, then the Discord results, each with its own header. If Rayward links the two accounts, the headers say so and name the source. Otherwise the bot says nothing about a link, since a missing link doesn't prove the accounts are unrelated.
+- Only `roblox`: checks all six sources plus Rotector's linked-Discord data. Any Discord accounts Rotector links to it are then checked too.
+- Only `discord`: checks Rotector, TASE, Okappiki and ServerSweep. Any Roblox accounts those sources link to it are then checked too, which covers RAB and RCR. If nothing is linked, the header lists RAB and RCR as not checked, since they only cover Roblox.
+- Both: runs both checks at the same time and sends the Roblox results, then the Discord results, each with its own header. Roblox-only sources (RAB and RCR) appear only in the Roblox results. If Rayward links the two accounts, the headers say so and name the source. Otherwise the bot says nothing about a link, since a missing link doesn't prove the accounts are unrelated.
 - Neither, in a 1-on-1 DM: checks the person you're talking to, if Discord shares who that is.
 - Neither, anywhere else: the bot asks who to check. Group DMs and servers never share their members, so use the right-click commands there.
 
 If either value isn't a valid username, ID or mention, the bot replies with an error and runs neither check.
+
+Linked accounts are checked automatically only when you fill in one side. The account you typed comes first, then each linked account, with a header saying which source linked it. The bot follows up to 3 linked accounts (set by `AUTO_LINK_MAX`) and lists any others by ID without checking them. It doesn't follow links from the linked accounts, and it skips Discord IDs that Rayward has partly hidden, since those can't be looked up. The right-click commands and the DM default follow links the same way.
 
 ### Right-click commands
 
@@ -38,11 +40,17 @@ These work in servers, DMs and group DMs. Discord doesn't allow options on right
 Each source gets its own card with a coloured side bar, and the card title names the result in words, for example "TASE database - No record". The header lists every source's result on one line in plain text.
 
 - Red: flagged or confirmed, an actual finding.
-- Orange: a process state such as queued, provisional or awaiting review.
+- Orange: a process state such as queued, provisional or awaiting review, or an RCR Watch.
 - Green: no record in that source, which is not the same as safe.
 - Purple: the source errored or didn't answer, so its result is unknown.
 - Blue: Rotector found linked Discord or alt accounts.
-- Grey: the source doesn't support this lookup, or nothing was linked.
+- Grey: Rotector has no linked Discord or alt accounts on record.
+
+### RCR records
+
+RCR (Roblox Criminal Records) is an archive of records that RCR staff file about Roblox users. Its card shows RCR's own standing (Ban, Flag or Watch), the charges, any staff notes and links to the full records on RCR's site.
+
+A record is an accusation filed by RCR staff, not a finding of fact. "Not on file" means RCR holds no record, not that the account is clear. RCR's terms also say not to keep its answers for more than 15 minutes. This bot doesn't store anything.
 
 ## Setup
 
@@ -56,7 +64,7 @@ Each source gets its own card with a coloured side bar, and the card title names
 2. Copy `.env.example` to `.env` and fill it in:
    - `DISCORD_TOKEN` comes from Developer Portal, then Bot, then Reset Token.
    - `OWNER_ID` is your Discord user ID. Turn on Developer Mode, right-click yourself and choose Copy User ID.
-   - `RAYWARD_API_KEY` is your key from https://rayward.app. One key covers all five sources.
+   - `RAYWARD_API_KEY` is your key from https://rayward.app. One key covers all six sources.
 
 ## Enable user install (Developer Portal)
 
@@ -79,6 +87,7 @@ Optional `.env` settings:
 
 - `LOG_LEVEL` sets how much the bot logs: `DEBUG`, `INFO` (the default), `WARNING` or `ERROR`.
 - `SYNC_COMMANDS` controls command syncing. `auto` (the default) syncs only when commands changed, `always` syncs on every start, and `never` skips syncing.
+- `AUTO_LINK_MAX` is how many linked accounts a one-sided check follows. The default is 3, and 0 turns it off. Each followed account counts against your Rayward daily lookup quota.
 - `DEBUG_INTERACTIONS=1` logs the raw channel data of each interaction. It includes user IDs, so leave it off unless you are debugging.
 
 ## Deploy to an Ubuntu VPS
@@ -145,7 +154,7 @@ If the token or another `.env` value is missing or invalid, the bot exits with c
 
 ## Notes
 
-- Rayward's terms say not to store responses for more than 24 hours. This bot stores nothing.
+- Rayward's terms say not to store responses for more than 24 hours, or 15 minutes for RCR. This bot stores nothing.
 - "Unflagged" means a source has no record of the account. Only Flagged and Confirmed are findings.
 - A 503 error means the source did not answer. The bot then shows that source as errored, never as clean.
 - Rayward hides parts of Discord IDs in evidence when you use a developer key.

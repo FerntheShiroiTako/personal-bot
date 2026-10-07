@@ -203,6 +203,46 @@ def format_rotector_links(result: LookupResult) -> str:
     return _fit_lines(lines)
 
 
+def format_rcr(result: LookupResult) -> str:
+    """Roblox Criminal Records. Same response shape as the others, but its terms say a record is
+    an accusation filed by RCR staff rather than a finding, so it is worded that way, and the
+    full filings live on RCR's own site (recordUrls)."""
+    if not result.ok:
+        return format_result(result)
+    d = result.data or {}
+    flag = d.get("flagType", 0)
+    lines: list[str] = []
+
+    if not flag:
+        lines.append("**Not on file** - RCR holds no record (not a clearance)")
+    else:
+        standing = _esc(d.get("statusLabel") or flag_name(flag))
+        lines.append(f"**{standing}** - an accusation filed by RCR staff, not a finding of fact")
+        if d.get("headerMessage"):
+            lines.append(f"*{_esc(d['headerMessage'])}*")
+
+    reasons = d.get("reasons") or []
+    if reasons:
+        lines.append("Charges:")
+    for reason in reasons[:MAX_REASONS]:
+        lines.append(f"- **{_esc(reason.get('title') or reason.get('type', '?'))}**")
+        evidence = [e for e in (_evidence_line(x) for x in reason.get("evidence") or []) if e]
+        for ev in evidence[:MAX_EVIDENCE_PER_REASON]:
+            lines.append(f"  {ev}")
+        if len(evidence) > MAX_EVIDENCE_PER_REASON:
+            lines.append(f"  … +{len(evidence) - MAX_EVIDENCE_PER_REASON} more notes")
+    if len(reasons) > MAX_REASONS:
+        lines.append(f"… +{len(reasons) - MAX_REASONS} more charges")
+
+    urls = [u for u in d.get("recordUrls") or [] if isinstance(u, str) and u.startswith("https://")]
+    if urls:
+        links = " ".join(f"[record {i}]({u})" for i, u in enumerate(urls[:5], 1))
+        lines.append(f"Full records on RCR: {links}")
+    if _ts(d.get("lastUpdated")):
+        lines.append(f"Record updated {_ts(d.get('lastUpdated'))}")
+    return _fit_lines(lines)
+
+
 @dataclass(frozen=True)
 class Status:
     label: str
@@ -214,7 +254,6 @@ PROCESS = Status("Under review", discord.Color.orange())
 CLEAR = Status("No record", discord.Color.green())
 ERROR = Status("Error", discord.Color.purple())
 INFO = Status("Links found", discord.Color.blue())
-NA = Status("Not supported", discord.Color.light_grey())
 NONE_LINKED = Status("None linked", discord.Color.light_grey())
 
 LEGEND = "Card colours: red flagged, orange under review, green no record, purple error"
@@ -226,6 +265,7 @@ class Section:
     value: str
     status: Status
     label: str | None = None  # defaults to the status label
+    short: str | None = None  # name in the header summary line; defaults to name minus " database"
 
 
 def result_status(result: LookupResult) -> Status:
@@ -252,21 +292,43 @@ def overall_color(results: Iterable[LookupResult]) -> discord.Color:
     return CLEAR.color
 
 
-def provider_sections(results: list[LookupResult], kind: Kind) -> list[Section]:
-    sections = [
-        Section(f"{r.provider.name} database", format_result(r), result_status(r),
-                flag_name(r.data.get("flagType", 0)) if r.ok and r.data and r.data.get("flagType") else None)
-        for r in results
-    ]
-    for p in PROVIDERS:
-        if not p.supports(kind):
-            sections.append(Section(f"{p.name} database", f"Does not support {kind.capitalize()} lookups.", NA))
+def _card_label(r: LookupResult) -> str | None:
+    """Word shown after the card title. None falls back to the status label."""
+    d = r.data or {}
+    if not r.ok or not d.get("flagType"):
+        return None
+    if r.provider.id == "rcr" and d.get("statusLabel"):
+        return str(d["statusLabel"])  # RCR's own standing: Ban, Flag or Watch
+    return flag_name(d.get("flagType"))
+
+
+def provider_sections(results: list[LookupResult]) -> list[Section]:
+    """One section per lookup that ran. Sources that can't do this lookup type get no card."""
+    sections = []
+    for r in results:
+        body = format_rcr(r) if r.provider.id == "rcr" and r.ok else format_result(r)
+        sections.append(Section(r.provider.card_title, body, result_status(r), _card_label(r), short=r.provider.name))
     return sections
+
+
+def not_checked_line(kinds: Iterable[Kind]) -> str | None:
+    """e.g. "Not checked: RAB, RCR (Roblox only)" for sources none of the given inputs suit."""
+    kinds = set(kinds)
+    skipped: dict[str, list[str]] = {}
+    for p in PROVIDERS:
+        if not any(p.supports(k) for k in kinds):
+            skipped.setdefault(p.only_type or "other lookups", []).append(p.name)
+    if not skipped:
+        return None
+    parts = [f"{', '.join(names)} ({only} only)" for only, names in skipped.items()]
+    return "Not checked: " + "; ".join(parts)
 
 
 def summary_line(sections: list[Section]) -> str:
     """Plain-text status per source, e.g. "Rotector: Confirmed | TASE: No record"."""
-    return " | ".join(f"{s.name.removesuffix(' database')}: {s.label or s.status.label}" for s in sections)
+    return " | ".join(
+        f"{s.short or s.name.removesuffix(' database')}: {s.label or s.status.label}" for s in sections
+    )
 
 
 Block = Tuple[discord.Embed, List[Section]]

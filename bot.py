@@ -13,6 +13,7 @@ import os
 import re
 import signal
 import sys
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Coroutine, Union
 
@@ -22,7 +23,7 @@ from discord import app_commands
 from dotenv import load_dotenv
 
 import embeds
-from rayward import ROTECTOR, LookupResult, RaywardClient
+from rayward import ROTECTOR, Kind, LookupResult, RaywardClient
 from roblox import RobloxClient, RobloxError, RobloxUser
 
 # Exit code for configuration errors (sysexits EX_CONFIG). The systemd unit lists it in
@@ -80,6 +81,12 @@ DEBUG_INTERACTIONS = _env_flag("DEBUG_INTERACTIONS")
 # auto: sync only when the command definitions changed since the last sync.
 # always / never: force it either way.
 SYNC_COMMANDS = (os.getenv("SYNC_COMMANDS") or "auto").strip().lower()
+# How many linked accounts a one-sided check follows automatically. 0 turns it off.
+# Every followed account costs Rayward daily quota.
+try:
+    AUTO_LINK_MAX = max(0, int((os.getenv("AUTO_LINK_MAX") or "3").strip()))
+except ValueError:
+    _config_error("AUTO_LINK_MAX must be a whole number (0 turns auto-follow off)")
 # systemd sets STATE_DIRECTORY from StateDirectory=; local runs keep state next to the code.
 STATE_DIR = Path(os.getenv("STATE_DIRECTORY") or Path(__file__).resolve().parent / ".state")
 
@@ -244,29 +251,82 @@ async def resolve_roblox(query: str) -> tuple[RobloxUser | None, str | None]:
     return user, None
 
 
-def roblox_coros(target: RobloxUser) -> list[Coroutine[Any, Any, Any]]:
-    """Results come back as (results, links, avatar, details)."""
-    return [
+def _lookup_list(value: Any) -> list[LookupResult]:
+    return value if isinstance(value, list) else []  # lookup_all never raises, but be defensive
+
+
+async def fetch_roblox(target: RobloxUser) -> tuple[list[LookupResult], LookupResult]:
+    """All Roblox lookups for one account, concurrently. Fills in target's profile and avatar.
+    Never raises."""
+    results, links, avatar, details = await asyncio.gather(
         bot.rayward.lookup_all("roblox", target.id),
         bot.rayward.rotector_discord_links(target.id),
         bot.roblox.get_headshot(target.id),
         bot.roblox.get_user(target.id) if target.created is None else asyncio.sleep(0, result=None),
-    ]
+        return_exceptions=True,
+    )
+    if isinstance(links, BaseException):
+        links = LookupResult(ROTECTOR, error=f"Unexpected error: {type(links).__name__}")
+    if isinstance(details, RobloxUser):
+        target.created, target.is_banned = details.created, details.is_banned
+        target.name = target.name or details.name
+        target.display_name = target.display_name or details.display_name
+    target.avatar_url = avatar if isinstance(avatar, str) else None
+    return _lookup_list(results), links
 
 
-def discord_coros(raw: str, known: discord.User | None) -> list[Coroutine[Any, Any, Any]]:
-    """Results come back as (results, user)."""
+async def fetch_discord(raw: str, known: discord.User | None) -> tuple[list[LookupResult], discord.User | None]:
+    """All Discord lookups for one account plus its profile, concurrently. Never raises."""
     async def fetch_discord_user() -> discord.User | None:
         try:
             return await bot.fetch_user(int(raw))
         except discord.HTTPException:
             return known
 
-    return [bot.rayward.lookup_all("discord", raw), fetch_discord_user()]
+    results, user = await asyncio.gather(
+        bot.rayward.lookup_all("discord", raw), fetch_discord_user(), return_exceptions=True,
+    )
+    return _lookup_list(results), user if isinstance(user, discord.User) else known
 
 
-def _lookup_list(value: Any) -> list[LookupResult]:
-    return value if isinstance(value, list) else []  # lookup_all never raises, but be defensive
+@dataclass
+class LinkedAccount:
+    id: str
+    sources: list[str] = field(default_factory=list)
+    name: str | None = None
+
+
+def linked_discord_accounts(links: LookupResult) -> list[LinkedAccount]:
+    """Discord accounts Rotector links to a Roblox user. Masked IDs can't be looked up, so
+    only full snowflakes count."""
+    found: dict[str, LinkedAccount] = {}
+    if links.ok:
+        for acc in (links.data or {}).get("discordAccounts") or []:
+            raw = str(acc.get("id") or "")
+            if SNOWFLAKE_RE.match(raw) and raw not in found:
+                found[raw] = LinkedAccount(raw, [links.provider.name])
+    return list(found.values())
+
+
+def linked_roblox_accounts(discord_results: list[LookupResult]) -> list[LinkedAccount]:
+    """Roblox accounts any source links to a Discord user, deduped across sources."""
+    found: dict[str, LinkedAccount] = {}
+    for r in discord_results:
+        if not r.ok:
+            continue
+        for acc in (r.data or {}).get("linkedRobloxAccounts") or []:
+            raw = str(acc.get("robloxUserId") or "")
+            if not (raw.isdigit() and len(raw) <= 20 and int(raw) > 0):
+                continue
+            entry = found.setdefault(raw, LinkedAccount(raw, name=acc.get("robloxUsername") or None))
+            if r.provider.name not in entry.sources:
+                entry.sources.append(r.provider.name)
+    return list(found.values())
+
+
+def _id_list(accounts: list[LinkedAccount], limit: int = 10) -> str:
+    shown = ", ".join(f"`{a.id}`" for a in accounts[:limit])
+    return shown + (f" and {len(accounts) - limit} more" if len(accounts) > limit else "")
 
 
 def accounts_linked(
@@ -294,7 +354,7 @@ def build_roblox_block(
         title = f"{target.display_name or target.name} (@{target.name})"
     else:
         title = f"Roblox user {target.id}"
-    sections = embeds.provider_sections(results, "roblox")
+    sections = embeds.provider_sections(results)
     sections.insert(1, embeds.Section(
         "Rotector - linked Discord", embeds.format_rotector_links(links), embeds.links_status(links),
     ))
@@ -328,7 +388,7 @@ def build_discord_block(
         title = f"{user.global_name or user.name} (@{user.name})"
     else:
         title = f"Discord user {raw}"
-    sections = embeds.provider_sections(results, "discord")
+    sections = embeds.provider_sections(results)
 
     header = discord.Embed(title=discord.utils.escape_markdown(title), color=embeds.overall_color(results))
     desc = [
@@ -357,6 +417,9 @@ async def run_checks(
 ) -> None:
     """Run a Roblox check, a Discord check, or both concurrently, and send the results.
 
+    When only one side is given, accounts that Rayward links to it on the other side are
+    checked too (up to AUTO_LINK_MAX), so the user gets both sides in one go.
+
     Expects the interaction to be deferred already. Inputs must be format-checked already.
     """
     target: RobloxUser | None = None
@@ -366,35 +429,21 @@ async def run_checks(
             await send_error(interaction, error or "Lookup failed.")
             return
 
-    coros: list[Coroutine[Any, Any, Any]] = []
+    jobs: list[Coroutine[Any, Any, Any]] = []
     if target is not None:
-        coros += roblox_coros(target)
+        jobs.append(fetch_roblox(target))
     if discord_id is not None:
-        coros += discord_coros(discord_id, known)
-    out = list(await asyncio.gather(*coros, return_exceptions=True))
+        jobs.append(fetch_discord(discord_id, known))
+    out = await asyncio.gather(*jobs)
 
-    roblox_out = out[:4] if target is not None else []
-    discord_out = out[-2:] if discord_id is not None else []
-
-    blocks: list[tuple[discord.Embed, list[embeds.Section]]] = []
     r_results: list[LookupResult] = []
     links = LookupResult(ROTECTOR, error="Not requested")
     if target is not None:
-        r_results, links, avatar, details = roblox_out
-        r_results = _lookup_list(r_results)
-        if isinstance(links, BaseException):
-            links = LookupResult(ROTECTOR, error=f"Unexpected error: {type(links).__name__}")
-        if isinstance(details, RobloxUser):
-            target.created, target.is_banned = details.created, details.is_banned
-            target.name = target.name or details.name
-            target.display_name = target.display_name or details.display_name
-        target.avatar_url = avatar if isinstance(avatar, str) else None
-
+        r_results, links = out[0]
     d_results: list[LookupResult] = []
     d_user: discord.User | None = None
     if discord_id is not None:
-        d_results = _lookup_list(discord_out[0])
-        d_user = discord_out[1] if isinstance(discord_out[1], discord.User) else known
+        d_results, d_user = out[-1]
 
     notes: list[str] = []
     if target is not None and discord_id is not None:
@@ -402,10 +451,60 @@ async def run_checks(
         if sources:
             notes = [f"**Linked:** Rayward links this Roblox and Discord account ({', '.join(sources)})."]
 
+    # One side given: follow what Rayward links to it on the other side. Never chained.
+    follow_kind: Kind | None = None
+    candidates: list[LinkedAccount] = []
+    origin = ""
+    if AUTO_LINK_MAX > 0 and target is not None and discord_id is None:
+        follow_kind, candidates = "discord", linked_discord_accounts(links)
+        origin = f"Roblox user {target.name or target.id}"
+    elif AUTO_LINK_MAX > 0 and discord_id is not None and target is None:
+        follow_kind, candidates = "roblox", linked_roblox_accounts(d_results)
+        origin = f"Discord user {d_user.name if d_user else discord_id}"
+    followed, extra = candidates[:AUTO_LINK_MAX], candidates[AUTO_LINK_MAX:]
+
+    async def follow(acc: LinkedAccount) -> embeds.Block:
+        note = f"**Auto-checked:** linked to {discord.utils.escape_markdown(origin)} via {', '.join(acc.sources)}."
+        if follow_kind == "roblox":
+            user = RobloxUser(id=int(acc.id), name=acc.name)
+            res, lk = await fetch_roblox(user)
+            return build_roblox_block(user, res, lk, [note])
+        res, u = await fetch_discord(acc.id, None)
+        return build_discord_block(acc.id, res, u, [note])
+
+    follow_out = await asyncio.gather(*(follow(a) for a in followed), return_exceptions=True)
+    follow_blocks: list[embeds.Block] = []
+    failed: list[LinkedAccount] = []
+    for acc, result in zip(followed, follow_out):
+        if isinstance(result, BaseException):
+            log.warning("Auto-check of linked account %s failed", acc.id, exc_info=result)
+            failed.append(acc)
+        else:
+            follow_blocks.append(result)
+
+    # Sources that suit none of the checked account types (e.g. Roblox-only ones on a
+    # Discord-only check) get no card, just one line in the first header.
+    kinds: set[Kind] = set()
+    if target is not None or (follow_kind == "roblox" and follow_blocks):
+        kinds.add("roblox")
+    if discord_id is not None or (follow_kind == "discord" and follow_blocks):
+        kinds.add("discord")
+    skipped = embeds.not_checked_line(kinds)
+
+    first_notes = list(notes)
+    if extra:
+        first_notes.append(f"Also linked, not checked (limit {AUTO_LINK_MAX}): {_id_list(extra)}")
+    if failed:
+        first_notes.append(f"Could not check linked: {_id_list(failed)}")
+    if skipped:
+        first_notes.append(f"-# {skipped}")
+
+    blocks: list[embeds.Block] = []
     if target is not None:
-        blocks.append(build_roblox_block(target, r_results, links, notes))
+        blocks.append(build_roblox_block(target, r_results, links, first_notes))
     if discord_id is not None:
-        blocks.append(build_discord_block(discord_id, d_results, d_user, notes))
+        blocks.append(build_discord_block(discord_id, d_results, d_user, notes if blocks else first_notes))
+    blocks += follow_blocks
 
     await send_messages(interaction, embeds.build_messages(*blocks), ephemeral)
 
